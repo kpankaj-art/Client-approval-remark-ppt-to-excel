@@ -1,192 +1,202 @@
+import streamlit as st
+import pandas as pd
+from pptx import Presentation
 import io
 import re
-import zipfile
-from pptx import Presentation
-import streamlit as st
-from PIL import Image, ImageDraw
 
-st.set_page_config(
-    page_title="PPT Marked Image Extractor", page_icon="🖼️", layout="centered"
+st.set_page_config(page_title="PPT Extra Tag & Excel Matcher", page_icon="🏷️", layout="wide")
+
+st.title("🏷️ Smart PPT Extra Tag Extractor & Excel Matcher")
+st.write("Ye tool PPT me image ke pass likhe 'OK', 'Approved' jaise floating tags ko automatic pehchan kar Excel me sahi row me attach kar dega.")
+
+uploaded_excel = st.file_uploader(
+    "1. Excel / CSV File Upload Karein (.xlsx, .xls, .xlsm, .xlsb, .csv)", 
+    type=["xlsx", "xls", "xlsm", "xlsb", "csv"]
 )
-st.title("🖼️ PPT Image Extractor (With Drawing Marks)")
-st.write(
-    "Format: **OutletName_MobileNo_Type_Size.jpg** (Preserves Green/Red Box Marks)"
-)
+uploaded_ppt = st.file_uploader("2. PPT File Upload Karein (.pptx)", type=["pptx"])
 
-# --- Selection Option ---
-image_option = st.radio(
-    "Select Image to Export:",
-    ("Image 1 (Left / Close View)", "Image 2 (Right / Far View)"),
-    index=0
-)
+def load_excel_file(file):
+    filename = file.name.lower()
+    if filename.endswith('.csv'):
+        return pd.read_csv(file)
+    elif filename.endswith('.xlsb'):
+        return pd.read_excel(file, engine='pyxlsb')
+    elif filename.endswith('.xls'):
+        try:
+            return pd.read_excel(file, engine='xlrd')
+        except Exception:
+            return pd.read_excel(file)
+    else:
+        return pd.read_excel(file)
 
+def find_column(df, keywords):
+    """Excel me dynamic column names dhundne ka function"""
+    for col in df.columns:
+        col_clean = str(col).lower().replace("_", " ").replace(".", " ").strip()
+        for kw in keywords:
+            if kw in col_clean:
+                return col
+    return None
 
-def clean_text(text):
-    if not text:
-        return ""
-    clean = re.sub(r'[\\/*?:"<>|\n\r\t]', " ", text)
-    clean = re.sub(r"\s+", " ", clean).strip()
-    return clean.replace(" ", "_")
+def extract_numbers(text):
+    """10-digit phone number extract karne ke liye"""
+    numbers = re.findall(r'\b\d{10}\b', str(text))
+    return numbers[0] if numbers else ""
 
+def clean_str(val):
+    return re.sub(r'[^a-zA-Z0-9]', '', str(val)).lower().strip()
 
-def extract_info_from_slide(slide):
-    all_text_blocks = []
-    for shape in slide.shapes:
-        if shape.has_text_frame and shape.text_frame.text.strip():
-            all_text_blocks.append(shape.text_frame.text.strip())
-        if shape.has_table:
-            for row in shape.table.rows:
-                for cell in row.cells:
-                    if cell.text.strip():
-                        all_text_blocks.append(cell.text.strip())
-
-    full_text = "\n".join(all_text_blocks)
-    outlet_name, contact_no, media_type, size = "", "", "", ""
-
-    outlet_match = re.search(
-        r"Outlet\s*Name\s*[:\-]?\s*([^\n\r]+)", full_text, re.IGNORECASE
-    )
-    if outlet_match:
-        raw_name = outlet_match.group(1).strip()
-        cleaned_name = re.split(
-            r"Address|City|Contact|Installation|Type|Size|Qty",
-            raw_name,
-            flags=re.IGNORECASE,
-        )[0].strip()
-        if cleaned_name:
-            outlet_name = cleaned_name
-
-    if not outlet_name:
-        ignore_keywords = [
-            "qty", "size", "type", "address", "city", "contact",
-            "far view", "close view", "board", "installation",
-            "dealer_code", "outlet",
-        ]
-        for block in all_text_blocks:
-            lines = [l.strip() for l in block.split("\n") if l.strip()]
-            for line in lines:
-                if not any(k in line.lower() for k in ignore_keywords):
-                    if len(line) > 2 and not line.isdigit():
-                        outlet_name = line
-                        break
-            if outlet_name:
-                break
-
-    contact_match = re.search(r"\b[6-9]\d{9}\b", full_text)
-    if contact_match:
-        contact_no = contact_match.group(0)
-
-    type_match = re.search(
-        r"\b(NL|FL|BL|SB|GSB|Non-Lit|Flex)\b", full_text, re.IGNORECASE
-    )
-    if type_match:
-        media_type = type_match.group(1).upper()
-
-    size_match = re.search(
-        r"(\d{1,3}\s*x\s*\d{1,3})", full_text, re.IGNORECASE
-    )
-    if size_match:
-        size = size_match.group(1).replace(" ", "").lower()
-
-    return outlet_name, contact_no, media_type, size
-
-
-def process_image_with_marks(slide, img_shape):
-    """Detects and overlays shape/box marks directly onto the image pixels"""
-    raw_img_bytes = img_shape.image.blob
-    img = Image.open(io.BytesIO(raw_img_bytes)).convert("RGB")
-    draw = ImageDraw.Draw(img)
-
-    img_left = img_shape.left
-    img_top = img_shape.top
-    img_width = img_shape.width
-    img_height = img_shape.height
-
-    real_w, real_h = img.size
-
-    for s in slide.shapes:
-        if s == img_shape or s.shape_type == 13:
-            continue
-
-        if (
-            s.left >= (img_left - 50000)
-            and (s.left + s.width) <= (img_left + img_width + 50000)
-            and s.top >= (img_top - 50000)
-            and (s.top + s.height) <= (img_top + img_height + 50000)
-        ):
-            rx1 = (s.left - img_left) / img_width
-            ry1 = (s.top - img_top) / img_height
-            rx2 = (s.left + s.width - img_left) / img_width
-            ry2 = (s.top + s.height - img_top) / img_height
-
-            x1 = max(0, rx1 * real_w)
-            y1 = max(0, ry1 * real_h)
-            x2 = min(real_w, rx2 * real_w)
-            y2 = min(real_h, ry2 * real_h)
-
-            mark_color = (0, 255, 0)
-            try:
-                if hasattr(s, "line") and s.line.color and s.line.color.rgb:
-                    rgb = s.line.color.rgb
-                    mark_color = (rgb[0], rgb[1], rgb[2])
-            except Exception:
-                pass
-
-            stroke = max(4, int(min(real_w, real_h) * 0.012))
-            draw.rectangle([x1, y1, x2, y2], outline=mark_color, width=stroke)
-
-    out = io.BytesIO()
-    img.save(out, format="JPEG", quality=95)
-    return out.getvalue()
-
-
-uploaded_file = st.file_uploader("Upload PowerPoint File (.pptx)", type=["pptx"])
-
-if uploaded_file is not None:
-    st.info(f"📁 **Uploaded File:** {uploaded_file.name} ({round(uploaded_file.size / (1024 * 1024), 2)} MB)")
+def clean_outlet_name(text):
+    """Outlet name se Address, Contact, District aur baki labels hatane ke liye"""
+    # Pure text me se "Address: ...", "Contact No: ...", "District: ..." ke aage ka hissa cut kar do
+    text = re.sub(r'^(Outlet Name:|Dealer Name:|Shop Name:)\s*', '', text, flags=re.IGNORECASE)
     
-    # --- START BUTTON ---
-    if st.button("▶️ Start Extraction", type="primary", use_container_width=True):
-        prs = Presentation(uploaded_file)
-        zip_buffer = io.BytesIO()
+    # Address ya Contact se pehle jo hai sirf wahi Outlet Name hai
+    text = re.split(r'\b(Address:|Contact No:|Contact:|District:|Media Type:)\b', text, flags=re.IGNORECASE)[0]
+    
+    return text.strip()
 
-        with st.spinner("Processing selected images..."):
-            with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-                for i, slide in enumerate(prs.slides):
-                    outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
-                    
-                    pic_shapes = [s for s in slide.shapes if s.shape_type == 13]
-                    pic_shapes = sorted(pic_shapes, key=lambda s: s.left)
+def process_ppt_data(ppt_file):
+    prs = Presentation(ppt_file)
+    ppt_records = []
 
-                    if pic_shapes:
-                        target_pic = None
-                        
-                        if "Image 1" in image_option and len(pic_shapes) >= 1:
-                            target_pic = pic_shapes[0]
-                        elif "Image 2" in image_option and len(pic_shapes) >= 2:
-                            target_pic = pic_shapes[1]
+    standard_labels = [
+        "outlet name", "dealer name", "shop name", "address", 
+        "contact no", "contact", "district", "media type", "size", "qty", "remarks", "s_no"
+    ]
 
-                        if target_pic:
-                            final_bytes = process_image_with_marks(slide, target_pic)
+    for idx, slide in enumerate(prs.slides):
+        contact_no, outlet_name, size_w, size_h = "", "", "", ""
+        extra_tags = []
 
-                            if not outlet_name:
-                                outlet_name = f"Slide_{i+1}"
+        full_slide_text = ""
 
-                            components = [clean_text(outlet_name)]
-                            if contact_no:
-                                components.append(clean_text(contact_no))
-                            if media_type:
-                                components.append(clean_text(media_type))
-                            if size:
-                                components.append(clean_text(size))
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                text = shape.text_frame.text.strip()
+                if not text:
+                    continue
 
-                            final_name = f"{'_'.join(components)}.jpg"
-                            zip_file.writestr(final_name, final_bytes)
+                full_slide_text += " " + text
+                text_lower = text.lower()
 
-        st.success("🎉 Process Complete!")
-        st.download_button(
-            label="📥 Download Selected Images (ZIP)",
-            data=zip_buffer.getvalue(),
-            file_name="Renamed_Images.zip",
-            mime="application/zip",
-        )
+                # 1. Outlet Name Extract & Clean
+                if any(lbl in text_lower for lbl in ["outlet name:", "dealer name:", "shop name:", "address:"]):
+                    if not outlet_name:
+                        outlet_name = clean_outlet_name(text)
+
+                # 2. Contact Number Extract
+                if ("contact" in text_lower or "mobile" in text_lower or "phone" in text_lower) and not contact_no:
+                    found_num = extract_numbers(text)
+                    if found_num:
+                        contact_no = found_num
+
+                # 3. Size Extract (e.g., Size: 360X48)
+                if "size:" in text_lower:
+                    size_text = text.split(":")[-1].strip().upper()
+                    size_parts = re.findall(r'\d+', size_text)
+                    if len(size_parts) >= 2:
+                        size_w, size_h = size_parts[0], size_parts[1]
+
+                # 4. Extra Tag / Status Text Detection (jaise "approved", "ok", etc.)
+                is_standard = any(label in text_lower for label in standard_labels)
+                if not is_standard and len(text) <= 30:
+                    extra_tags.append(text)
+
+        # Slide level fallback check
+        if not contact_no:
+            found_num = extract_numbers(full_slide_text)
+            if found_num:
+                contact_no = found_num
+
+        if not outlet_name and full_slide_text:
+            # First line fallback
+            lines = [l.strip() for l in full_slide_text.split('\n') if l.strip()]
+            if lines:
+                outlet_name = clean_outlet_name(lines[0])
+
+        final_status = " | ".join(extra_tags) if extra_tags else "Pending/None"
+
+        ppt_records.append({
+            "Slide_No": idx + 1,
+            "PPT_Outlet_Name": outlet_name,
+            "PPT_Contact": contact_no,
+            "PPT_Width": size_w,
+            "PPT_Height": size_h,
+            "PPT_Status": final_status
+        })
+
+    return pd.DataFrame(ppt_records)
+
+if uploaded_excel and uploaded_ppt:
+    try:
+        df_excel = load_excel_file(uploaded_excel)
+        df_ppt = process_ppt_data(uploaded_ppt)
+
+        st.subheader("PPT Extracted Data (Extra Status Tags Ke Sath)")
+        st.dataframe(df_ppt)
+
+        # Dynamic Column Detection for Excel (Expanded list)
+        name_col = find_column(df_excel, [
+            "dealer name", "shop name", "outlet name", "client name", "party name", "name", "dealer"
+        ])
+        contact_col = find_column(df_excel, [
+            "dealer contact", "contact no", "contact", "mobile no", "mobile", "phone", "number"
+        ])
+        width_col = find_column(df_excel, ["width", "w", "size w"])
+        height_col = find_column(df_excel, ["height", "h", "size h"])
+
+        if name_col and contact_col:
+            st.info(f"Excel Columns Auto-Detected: Name Column -> **'{name_col}'** | Contact Column -> **'{contact_col}'**")
+
+            df_excel['clean_name'] = df_excel[name_col].apply(clean_str)
+            df_excel['clean_contact'] = df_excel[contact_col].astype(str).str.extract(r'(\d{10})').fillna('')
+            df_excel['clean_w'] = df_excel[width_col].astype(str).str.extract(r'(\d+)').fillna('') if width_col else ''
+            df_excel['clean_h'] = df_excel[height_col].astype(str).str.extract(r'(\d+)').fillna('') if height_col else ''
+
+            # Key for Matching
+            df_excel['match_key'] = (
+                df_excel['clean_name'] + "_" + 
+                df_excel['clean_contact'] + "_" + 
+                df_excel['clean_w'] + "_" + 
+                df_excel['clean_h']
+            )
+
+            df_ppt['clean_name'] = df_ppt['PPT_Outlet_Name'].apply(clean_str)
+            df_ppt['clean_contact'] = df_ppt['PPT_Contact'].astype(str)
+            df_ppt['clean_w'] = df_ppt['PPT_Width'].astype(str)
+            df_ppt['clean_h'] = df_ppt['PPT_Height'].astype(str)
+
+            df_ppt['match_key'] = (
+                df_ppt['clean_name'] + "_" + 
+                df_ppt['clean_contact'] + "_" + 
+                df_ppt['clean_w'] + "_" + 
+                df_ppt['clean_h']
+            )
+
+            # Map Status to Excel
+            status_dict = dict(zip(df_ppt['match_key'], df_ppt['PPT_Status']))
+            df_excel['PPT_Status'] = df_excel['match_key'].map(status_dict).fillna("Not Found / No Match")
+
+            # Final Cleanup
+            df_final = df_excel.drop(columns=['clean_name', 'clean_contact', 'clean_w', 'clean_h', 'match_key'])
+
+            st.success("✅ Matching Complete! Naya Status Column Update Ho Gaya Hai.")
+            st.dataframe(df_final.head(15))
+
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df_final.to_excel(writer, index=False)
+            processed_data = output.getvalue()
+
+            st.download_button(
+                label="📥 Updated Excel Download Karein (.xlsx)",
+                data=processed_data,
+                file_name="PPT_Matched_Report.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.error(f"Excel me Name ya Contact wala column auto-detect nahi hua. Excel ke header column names check karein.")
+
+    except Exception as e:
+        st.error(f"Error aaya file process karne me: {e}")
