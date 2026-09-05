@@ -9,8 +9,23 @@ st.set_page_config(page_title="PPT Extra Tag & Excel Matcher", page_icon="🏷�
 st.title("🏷️ Smart PPT Extra Tag Extractor & Excel Matcher")
 st.write("Ye tool PPT me image ke pass likhe 'OK', 'Approved' jaise floating tags ko automatic pehchan kar Excel me sahi row me attach kar dega.")
 
-uploaded_excel = st.file_uploader("1. Excel File Upload Karein (.xlsx)", type=["xlsx"])
+# Updated File Uploader: Support for all Excel formats (.xlsx, .xls, .xlsm, .xlsb, .csv)
+uploaded_excel = st.file_uploader(
+    "1. Excel File Upload Karein (.xlsx, .xls, .xlsm, .xlsb, .csv)", 
+    type=["xlsx", "xls", "xlsm", "xlsb", "csv"]
+)
 uploaded_ppt = st.file_uploader("2. PPT File Upload Karein (.pptx)", type=["pptx"])
+
+def load_excel_file(file):
+    """Har tarah ke Excel aur CSV formats ko load karne ke liye helper function"""
+    filename = file.name.lower()
+    if filename.endswith('.csv'):
+        return pd.read_csv(file)
+    elif filename.endswith('.xlsb'):
+        return pd.read_excel(file, engine='pyxlsb')
+    else:
+        # Handles .xlsx, .xls, .xlsm automatically
+        return pd.read_excel(file)
 
 def find_column(df, keywords):
     """Excel me dynamic column names dhundne ka function"""
@@ -70,9 +85,8 @@ def process_ppt_data(ppt_file):
 
                 # 4. Extra Tag / Floating Status Text Detection (jaise "OK", "approved", etc.)
                 else:
-                    # Check karein ki ye text kisi standard label ka part to nahi hai
                     is_standard = any(label in text_lower for label in standard_labels)
-                    if not is_standard and len(text) <= 30:  # Chhota tag text hota hai
+                    if not is_standard and len(text) <= 30:  # Chhota tag text
                         extra_tags.append(text)
 
         # Agar shape text me contact na mil sake to full slide check karein
@@ -97,7 +111,8 @@ def process_ppt_data(ppt_file):
 
 if uploaded_excel and uploaded_ppt:
     try:
-        df_excel = pd.read_excel(uploaded_excel)
+        # Load Excel using all-format helper
+        df_excel = load_excel_file(uploaded_excel)
         df_ppt = process_ppt_data(uploaded_ppt)
 
         st.subheader("PPT Extracted Data (Extra Status Tags Ke Sath)")
@@ -153,11 +168,13 @@ if uploaded_excel and uploaded_ppt:
             processed_data = output.getvalue()
 
             st.download_button(
-                label="📥 Updated Excel Download Karein",
+                label="📥 Updated Excel Download Karein (.xlsx)",
                 data=processed_data,
                 file_name="PPT_Matched_Report.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+        else:
+            st.error("Excel me Name ya Contact wala column nahi mila. Kripya check karein.")
 
     except Exception as e:
-        st.error(f"Error aaya: {e}")
+        st.error(f"Error aaya file read karne me: {e}")
