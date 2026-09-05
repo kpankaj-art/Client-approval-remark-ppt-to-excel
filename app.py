@@ -50,32 +50,35 @@ def clean_str(val):
 
 def parse_dynamic_text(raw_text):
     """
-    Safely parses unstructured text and extracts Outlet Name, Address, Contact, District, Size, Media Type, SAP Code.
-    Missing fields remain empty string.
+    Splits combined text frame into clean Outlet Name, Address, Contact, District, Size, Media Type, etc.
     """
     text = " ".join(raw_text.split())
+
+    # 1. Extract Pure Outlet Name (Everything BEFORE 'Address:' or 'Contact' or 'District')
+    # This ensures "RAJ TRADING COMPANY" is clean and separated from "Address: Mahari khawa..."
+    name_split = re.split(r'\b(Address:|Contact\s*No:|Contact:|District:|Size:|Media\s*Type:|SAP\s*Code:|SAP:)\b', text, flags=re.IGNORECASE)
+    pure_outlet_name = name_split[0].strip()
     
-    # 1. Contact Number
+    # Remove prefixes like "Outlet Name:", "Dealer Name:", "Shop Name:"
+    pure_outlet_name = re.sub(r'^(Outlet Name:|Dealer Name:|Shop Name:|Party Name:)\s*', '', pure_outlet_name, flags=re.IGNORECASE).strip()
+
+    # 2. Extract 10-Digit Mobile Number
     contact_no = extract_numbers(text)
 
-    # 2. Key-Value Regex Extraction (Handles Address, District, Size, Media Type, SAP Code)
+    # Helper function for Regex Extraction of other fields
     def extract_field(pattern):
         match = re.search(pattern, text, re.IGNORECASE)
         return match.group(1).strip() if match else ""
 
-    address = extract_field(r'Address:\s*(.*?)(?=\s*(?:Contact|District|Size|Media|SAP|Remarks|Qty|s_no|$))')
-    district = extract_field(r'District:\s*([A-Za-z0-9\s\-_]+?)(?=\s*(?:Size|Media|SAP|Remarks|Qty|s_no|Contact|Address|$))')
-    size = extract_field(r'Size:\s*([0-9X\s]+?)(?=\s*(?:Media|SAP|Remarks|Qty|s_no|District|Contact|Address|$))')
-    media_type = extract_field(r'Media\s*Type:\s*([A-Za-z0-9\s\-_]+?)(?=\s*(?:Remarks|Qty|s_no|District|Size|Contact|Address|$))')
+    # 3. Extract Individual Fields
+    address = extract_field(r'Address:\s*(.*?)(?=\s*(?:Contact|District|Size|Media|Remarks|Qty|s_no|SAP|$))')
+    district = extract_field(r'District:\s*([A-Za-z0-9\s\-_]+?)(?=\s*(?:Size|Media|Remarks|Qty|s_no|Contact|Address|SAP|$))')
+    size = extract_field(r'Size:\s*([0-9X\s]+?)(?=\s*(?:Media|Remarks|Qty|s_no|District|Contact|Address|SAP|$))')
+    media_type = extract_field(r'Media\s*Type:\s*([A-Za-z0-9\s\-_]+?)(?=\s*(?:Remarks|Qty|s_no|District|Size|Contact|Address|SAP|$))')
     sap_code = extract_field(r'SAP\s*(?:Code)?:\s*([A-Za-z0-9]+?)(?=\s*(?:Address|Contact|District|Size|Media|Remarks|$))')
 
-    # 3. Pure Outlet Name Extraction
-    split_match = re.split(r'\b(Address:|Contact\s*No:|Contact:|District:|Size:|Media\s*Type:|SAP\s*Code:|SAP:)\b', text, flags=re.IGNORECASE)
-    outlet_name = split_match[0].strip()
-    outlet_name = re.sub(r'^(Outlet Name:|Dealer Name:|Shop Name:)\s*', '', outlet_name, flags=re.IGNORECASE).strip()
-
     return {
-        "PPT_Outlet_Name": outlet_name,
+        "PPT_Outlet_Name": pure_outlet_name,
         "PPT_Address": address,
         "PPT_Contact": contact_no,
         "PPT_District": district,
@@ -106,7 +109,7 @@ def process_ppt_data(ppt_file):
                 text_lower = text.lower()
                 text_blocks.append(text)
 
-                # Capture floating status tags
+                # Capture floating status tags (e.g. approved, pending)
                 is_standard = any(kw in text_lower for kw in standard_keywords)
                 if not is_standard and len(text) <= 35:
                     extra_tags.append(text)
@@ -130,7 +133,7 @@ if uploaded_excel and uploaded_ppt:
                 df_excel = load_excel_file(uploaded_excel)
                 df_ppt = process_ppt_data(uploaded_ppt)
 
-                st.subheader("📊 Extracted PPT Data")
+                st.subheader("📊 Extracted PPT Data (Clean & Split Columns)")
                 st.dataframe(df_ppt, use_container_width=True)
 
                 # Column Detection for Excel
@@ -198,7 +201,7 @@ if uploaded_excel and uploaded_ppt:
                         use_container_width=True
                     )
                 else:
-                    st.error("Could not auto-detect Name or Contact column in Excel. Please check column headers.")
+                    st.error("Could not auto-detect Name or Contact column in Excel. Please verify that your uploaded Excel sheet contains column headers like 'Dealer Name' or 'Contact No'.")
 
             except Exception as e:
                 st.error(f"Error processing files: {e}")
