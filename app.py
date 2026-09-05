@@ -4,10 +4,10 @@ from pptx import Presentation
 import io
 import re
 
-st.set_page_config(page_title="PPT Tag Extractor & Excel Matcher", page_icon="🏷️", layout="wide")
+st.set_page_config(page_title="PPT Extractor & Excel Matcher", page_icon="🏷️", layout="wide")
 
-st.title("🏷️ Smart PPT Tag Extractor & Excel Splitter")
-st.write("Extract and split PPT details into clean individual columns dynamically and match them with your Excel file.")
+st.title("🏷️ PPT Extra Tag Extractor & Excel Matcher")
+st.write("Extract details from PPT and cleanly match/append them into your Excel file.")
 
 # File Uploaders
 uploaded_excel = st.file_uploader(
@@ -17,7 +17,6 @@ uploaded_excel = st.file_uploader(
 uploaded_ppt = st.file_uploader("2. Upload PPT File (.pptx)", type=["pptx"])
 
 def load_excel_file(file):
-    """Safely loads various Excel and CSV formats"""
     filename = file.name.lower()
     if filename.endswith('.csv'):
         return pd.read_csv(file)
@@ -32,7 +31,6 @@ def load_excel_file(file):
         return pd.read_excel(file)
 
 def find_column(df, keywords):
-    """Dynamic column finder for Excel sheets"""
     for col in df.columns:
         col_clean = str(col).lower().replace("_", " ").replace(".", " ").strip()
         for kw in keywords:
@@ -41,62 +39,33 @@ def find_column(df, keywords):
     return None
 
 def extract_numbers(text):
-    """Extracts 10-digit phone number"""
     numbers = re.findall(r'\b\d{10}\b', str(text))
     return numbers[0] if numbers else ""
 
 def clean_str(val):
     return re.sub(r'[^a-zA-Z0-9]', '', str(val)).lower().strip()
 
-def clean_outlet_name(raw_name):
-    """
-    Strips out any trailing key-value metadata from the name string.
-    Guarantees pure Outlet/Dealer name output.
-    """
-    if not raw_name:
-        return ""
-    
-    # Cut everything starting from keywords like Address:, Contact, District:, Size:, etc.
-    split_pattern = r'\b(Address\s*:|Contact\s*No\s*:|Contact\s*:|District\s*:|Size\s*:|Media\s*Type\s*:|Remarks\s*:|Qty\s*:|s_no\s*:|SAP\s*Code\s*:|SAP\s*:)\b'
-    clean_name = re.split(split_pattern, raw_name, flags=re.IGNORECASE)[0].strip()
+def extract_field(pattern, text):
+    match = re.search(pattern, text, re.IGNORECASE)
+    return match.group(1).strip() if match else ""
 
-    # Strip prefix labels if present
-    clean_name = re.sub(r'^(Outlet Name|Dealer Name|Shop Name|Party Name)\s*:\s*', '', clean_name, flags=re.IGNORECASE).strip()
-    return clean_name
+def parse_slide_content(full_text):
+    text = " ".join(full_text.split())
 
-def parse_dynamic_text(raw_text):
-    """
-    Splits text frame into clean Outlet Name, Address, Contact, District, Size, Media Type, etc.
-    """
-    text = " ".join(raw_text.split())
+    # 1. Strict Outlet Name Clean (Cut everything from 'Address:' onwards)
+    split_parts = re.split(r'\b(Address\s*:|Contact\s*No\s*:|Contact\s*:|District\s*:|Size\s*:|Media\s*Type\s*:)\b', text, flags=re.IGNORECASE)
+    pure_outlet_name = split_parts[0].strip()
+    pure_outlet_name = re.sub(r'^(Outlet Name|Dealer Name|Shop Name|Party Name)\s*:\s*', '', pure_outlet_name, flags=re.IGNORECASE).strip()
 
-    # Extract 10-Digit Mobile Number
+    # 2. Extract Individual Fields
     contact_no = extract_numbers(text)
+    address = extract_field(r'Address\s*:\s*(.*?)(?=\s*(?:Contact|District|Size|Media|Remarks|Qty|s_no|SAP|$))', text)
+    district = extract_field(r'District\s*:\s*([A-Za-z0-9\s\-_]+?)(?=\s*(?:Size|Media|Remarks|Qty|s_no|Contact|Address|SAP|$))', text)
+    size = extract_field(r'Size\s*:\s*([0-9X\s]+?)(?=\s*(?:Media|Remarks|Qty|s_no|District|Contact|Address|SAP|$))', text)
+    media_type = extract_field(r'Media\s*Type\s*:\s*([A-Za-z0-9\s\-_]+?)(?=\s*(?:Remarks|Qty|s_no|District|Size|Contact|Address|SAP|$))', text)
+    sap_code = extract_field(r'SAP\s*(?:Code)?\s*:\s*([A-Za-z0-9]+?)(?=\s*(?:Address|Contact|District|Size|Media|Remarks|$))', text)
 
-    # Helper function for Regex Extraction of individual fields
-    def extract_field(pattern):
-        match = re.search(pattern, text, re.IGNORECASE)
-        return match.group(1).strip() if match else ""
-
-    # Extract Individual Fields
-    address = extract_field(r'Address\s*:\s*(.*?)(?=\s*(?:Contact|District|Size|Media|Remarks|Qty|s_no|SAP|$))')
-    district = extract_field(r'District\s*:\s*([A-Za-z0-9\s\-_]+?)(?=\s*(?:Size|Media|Remarks|Qty|s_no|Contact|Address|SAP|$))')
-    size = extract_field(r'Size\s*:\s*([0-9X\s]+?)(?=\s*(?:Media|Remarks|Qty|s_no|District|Contact|Address|SAP|$))')
-    media_type = extract_field(r'Media\s*Type\s*:\s*([A-Za-z0-9\s\-_]+?)(?=\s*(?:Remarks|Qty|s_no|District|Size|Contact|Address|SAP|$))')
-    sap_code = extract_field(r'SAP\s*(?:Code)?\s*:\s*([A-Za-z0-9]+?)(?=\s*(?:Address|Contact|District|Size|Media|Remarks|$))')
-
-    # Strict Pure Outlet Name Cleaning
-    pure_outlet_name = clean_outlet_name(text)
-
-    return {
-        "PPT_Outlet_Name": pure_outlet_name,
-        "PPT_Address": address,
-        "PPT_Contact": contact_no,
-        "PPT_District": district,
-        "PPT_Size": size,
-        "PPT_Media_Type": media_type,
-        "PPT_SAP_Code": sap_code
-    }
+    return pure_outlet_name, address, contact_no, district, size, media_type, sap_code
 
 def process_ppt_data(ppt_file):
     prs = Presentation(ppt_file)
@@ -120,99 +89,103 @@ def process_ppt_data(ppt_file):
                 text_lower = text.lower()
                 text_blocks.append(text)
 
-                # Capture floating status tags (e.g. approved, pending)
                 is_standard = any(kw in text_lower for kw in standard_keywords)
                 if not is_standard and len(text) <= 35:
                     extra_tags.append(text)
 
         full_text = " ".join(text_blocks)
-        parsed_fields = parse_dynamic_text(full_text)
-        
-        parsed_fields["Slide_No"] = idx + 1
-        parsed_fields["PPT_Status"] = " | ".join(extra_tags) if extra_tags else "Pending/None"
+        name, addr, contact, dist, sz, media, sap = parse_slide_content(full_text)
 
-        ppt_records.append(parsed_fields)
+        ppt_records.append({
+            "Slide_No": idx + 1,
+            "PPT_Outlet_Name": name,
+            "PPT_Address": addr,
+            "PPT_Contact": contact,
+            "PPT_District": dist,
+            "PPT_Size": sz,
+            "PPT_Media_Type": media,
+            "PPT_SAP_Code": sap,
+            "PPT_Status": " | ".join(extra_tags) if extra_tags else "Pending/None"
+        })
 
     return pd.DataFrame(ppt_records)
 
 # Execution Flow
 if uploaded_excel and uploaded_ppt:
-    st.markdown("---")
-    if st.button("▶️ Start Processing & Matching", type="primary", use_container_width=True):
-        with st.spinner("Processing PPT slides and matching Excel data... Please wait."):
-            try:
-                df_excel = load_excel_file(uploaded_excel)
-                df_ppt = process_ppt_data(uploaded_ppt)
+    try:
+        df_excel = load_excel_file(uploaded_excel)
+        df_ppt = process_ppt_data(uploaded_ppt)
 
-                st.subheader("📊 Extracted PPT Data (Clean & Split Columns)")
+        st.markdown("---")
+        st.subheader("⚙️ Match Options & Column Selection")
+        
+        # Auto-detect initial columns
+        auto_name = find_column(df_excel, ["dealer name", "shop name", "outlet name", "client name", "party name", "name", "dealer"])
+        auto_contact = find_column(df_excel, ["dealer contact", "contact no", "contact", "mobile no", "mobile", "phone", "number"])
+
+        excel_cols = list(df_excel.columns)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            selected_name_col = st.selectbox(
+                "Select Excel Column for Name / Dealer Name:", 
+                options=excel_cols, 
+                index=excel_cols.index(auto_name) if auto_name in excel_cols else 0
+            )
+        with col2:
+            selected_contact_col = st.selectbox(
+                "Select Excel Column for Contact / Mobile Number:", 
+                options=excel_cols, 
+                index=excel_cols.index(auto_contact) if auto_contact in excel_cols else 0
+            )
+
+        if st.button("▶️ Start Processing & Matching", type="primary", use_container_width=True):
+            with st.spinner("Processing PPT and matching Excel dataset..."):
+
+                st.subheader("📊 Extracted PPT Data (Split into Clean Columns)")
                 st.dataframe(df_ppt, use_container_width=True)
 
-                # Column Detection for Excel
-                name_col = find_column(df_excel, [
-                    "dealer name", "shop name", "outlet name", "client name", "party name", "name", "dealer", "outlet"
-                ])
-                contact_col = find_column(df_excel, [
-                    "dealer contact", "contact no", "contact", "mobile no", "mobile", "phone", "number"
-                ])
-                width_col = find_column(df_excel, ["width", "w", "size w"])
-                height_col = find_column(df_excel, ["height", "h", "size h"])
+                # Matching Keys
+                df_excel['clean_name'] = df_excel[selected_name_col].apply(clean_str)
+                df_excel['clean_contact'] = df_excel[selected_contact_col].astype(str).str.extract(r'(\d{10})').fillna('')
 
-                if name_col and contact_col:
-                    st.info(f"Auto-Detected Excel Columns: **Name** -> '{name_col}' | **Contact** -> '{contact_col}'")
+                df_ppt['clean_name'] = df_ppt['PPT_Outlet_Name'].apply(clean_str)
+                df_ppt['clean_contact'] = df_ppt['PPT_Contact'].astype(str)
 
-                    # Matching Keys
-                    df_excel['clean_name'] = df_excel[name_col].apply(clean_str)
-                    df_excel['clean_contact'] = df_excel[contact_col].astype(str).str.extract(r'(\d{10})').fillna('')
-                    df_excel['clean_w'] = df_excel[width_col].astype(str).str.extract(r'(\d+)').fillna('') if width_col else ''
-                    df_excel['clean_h'] = df_excel[height_col].astype(str).str.extract(r'(\d+)').fillna('') if height_col else ''
+                # Match logic: Try Contact match first, fallback to Name
+                status_by_contact = dict(zip(df_ppt['clean_contact'], df_ppt['PPT_Status']))
+                status_by_name = dict(zip(df_ppt['clean_name'], df_ppt['PPT_Status']))
 
-                    df_excel['match_key'] = (
-                        df_excel['clean_name'] + "_" + 
-                        df_excel['clean_contact'] + "_" + 
-                        df_excel['clean_w'] + "_" + 
-                        df_excel['clean_h']
-                    )
+                addr_by_contact = dict(zip(df_ppt['clean_contact'], df_ppt['PPT_Address']))
+                dist_by_contact = dict(zip(df_ppt['clean_contact'], df_ppt['PPT_District']))
+                size_by_contact = dict(zip(df_ppt['clean_contact'], df_ppt['PPT_Size']))
 
-                    df_ppt['clean_name'] = df_ppt['PPT_Outlet_Name'].apply(clean_str)
-                    df_ppt['clean_contact'] = df_ppt['PPT_Contact'].astype(str)
-                    df_ppt['clean_w'] = df_ppt['PPT_Size'].str.extract(r'(\d+)').fillna('')
-                    df_ppt['clean_h'] = df_ppt['PPT_Size'].str.extract(r'x(\d+)', flags=re.IGNORECASE).fillna('')
+                # Mapping to Excel
+                df_excel['PPT_Status'] = df_excel['clean_contact'].map(status_by_contact).fillna(df_excel['clean_name'].map(status_by_name)).fillna("Not Found / No Match")
+                df_excel['PPT_Address'] = df_excel['clean_contact'].map(addr_by_contact).fillna("")
+                df_excel['PPT_District'] = df_excel['clean_contact'].map(dist_by_contact).fillna("")
+                df_excel['PPT_Size'] = df_excel['clean_contact'].map(size_by_contact).fillna("")
 
-                    df_ppt['match_key'] = (
-                        df_ppt['clean_name'] + "_" + 
-                        df_ppt['clean_contact'] + "_" + 
-                        df_ppt['clean_w'] + "_" + 
-                        df_ppt['clean_h']
-                    )
+                # Drop temporary matching columns
+                df_final = df_excel.drop(columns=['clean_name', 'clean_contact'])
 
-                    # Map Split Data into Excel
-                    for target_col in ['PPT_Status', 'PPT_Address', 'PPT_District', 'PPT_Size', 'PPT_Media_Type', 'PPT_SAP_Code']:
-                        if target_col in df_ppt.columns:
-                            col_dict = dict(zip(df_ppt['match_key'], df_ppt[target_col]))
-                            df_excel[target_col] = df_excel['match_key'].map(col_dict).fillna("" if target_col != 'PPT_Status' else "Not Found / No Match")
+                st.success("✅ Matching Completed Successfully!")
+                st.subheader("📋 Final Updated Excel Dataset")
+                st.dataframe(df_final, use_container_width=True)
 
-                    # Cleanup Temp Columns
-                    df_final = df_excel.drop(columns=['clean_name', 'clean_contact', 'clean_w', 'clean_h', 'match_key'])
+                # Export File Download
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    df_final.to_excel(writer, index=False)
+                processed_data = output.getvalue()
 
-                    st.success("✅ Processing and Matching Completed Successfully!")
-                    st.subheader("📋 Final Matched Excel Preview")
-                    st.dataframe(df_final.head(15), use_container_width=True)
+                st.download_button(
+                    label="📥 Download Updated Excel File (.xlsx)",
+                    data=processed_data,
+                    file_name="PPT_Matched_Report.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
 
-                    # Export to Excel
-                    output = io.BytesIO()
-                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                        df_final.to_excel(writer, index=False)
-                    processed_data = output.getvalue()
-
-                    st.download_button(
-                        label="📥 Download Updated Excel File (.xlsx)",
-                        data=processed_data,
-                        file_name="PPT_Matched_Report.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
-                    )
-                else:
-                    st.error("Could not auto-detect Name or Contact column in Excel. Please verify sheet headers.")
-
-            except Exception as e:
-                st.error(f"Error processing files: {e}")
+    except Exception as e:
+        st.error(f"Error processing files: {e}")
