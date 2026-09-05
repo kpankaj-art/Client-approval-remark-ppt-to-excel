@@ -9,7 +9,6 @@ st.set_page_config(page_title="PPT Extra Tag & Excel Matcher", page_icon="🏷�
 st.title("🏷️ Smart PPT Extra Tag Extractor & Excel Matcher")
 st.write("Ye tool PPT me image ke pass likhe 'OK', 'Approved' jaise floating tags ko automatic pehchan kar Excel me sahi row me attach kar dega.")
 
-# Format options for all types of Excel & CSV files
 uploaded_excel = st.file_uploader(
     "1. Excel / CSV File Upload Karein (.xlsx, .xls, .xlsm, .xlsb, .csv)", 
     type=["xlsx", "xls", "xlsm", "xlsb", "csv"]
@@ -17,9 +16,7 @@ uploaded_excel = st.file_uploader(
 uploaded_ppt = st.file_uploader("2. PPT File Upload Karein (.pptx)", type=["pptx"])
 
 def load_excel_file(file):
-    """Har tarah ke Excel (.xlsx, .xls, .xlsm, .xlsb) aur .csv formats ko safe tarike se read karne ke liye"""
     filename = file.name.lower()
-    
     if filename.endswith('.csv'):
         return pd.read_csv(file)
     elif filename.endswith('.xlsb'):
@@ -87,8 +84,9 @@ def process_ppt_data(ppt_file):
                     if not is_standard and len(text) <= 30:
                         extra_tags.append(text)
 
+        # Fixed: Correct variable name inside generator
         if not contact_no:
-            full_text = " ".join([s.text_frame.text for s.text_frame in slide.shapes if s.has_text_frame])
+            full_text = " ".join([sh.text_frame.text for sh in slide.shapes if sh.has_text_frame])
             found_num = extract_numbers(full_text)
             if found_num:
                 contact_no = found_num
