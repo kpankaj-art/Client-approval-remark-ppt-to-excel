@@ -18,28 +18,46 @@ uploaded_ppt = st.file_uploader("2. Upload PPT File (.pptx)", type=["pptx"])
 
 def load_excel_file(file):
     filename = file.name.lower()
+    
     if filename.endswith('.csv'):
-        return pd.read_csv(file)
+        df_raw = pd.read_csv(file, nrows=15, header=None)
+        file.seek(0)
     elif filename.endswith('.xlsb'):
-        return pd.read_excel(file, engine='pyxlsb')
-    elif filename.endswith('.xls'):
-        try:
-            return pd.read_excel(file, engine='xlrd')
-        except Exception:
-            return pd.read_excel(file)
+        df_raw = pd.read_excel(file, engine='pyxlsb', nrows=15, header=None)
+        file.seek(0)
     else:
-        return pd.read_excel(file)
+        df_raw = pd.read_excel(file, nrows=15, header=None)
+        file.seek(0)
+
+    header_row_idx = 0
+    max_valid_cols = 0
+
+    for i in range(len(df_raw)):
+        row_vals = [str(x).strip() for x in df_raw.iloc[i].dropna().values]
+        header_candidates = [x for x in row_vals if not x.isdigit() and len(x) > 1 and x.lower() != 'nan']
+        if len(header_candidates) > max_valid_cols:
+            max_valid_cols = len(header_candidates)
+            header_row_idx = i
+
+    if filename.endswith('.csv'):
+        df = pd.read_csv(file, header=header_row_idx)
+    elif filename.endswith('.xlsb'):
+        df = pd.read_excel(file, engine='pyxlsb', header=header_row_idx)
+    else:
+        df = pd.read_excel(file, header=header_row_idx)
+
+    df.columns = [str(col).strip() for col in df.columns]
+    df = df.loc[:, ~df.columns.str.contains('^Unnamed', na=False)]
+    return df
 
 def extract_numbers(text):
     numbers = re.findall(r'\b\d{10}\b', str(text))
     return numbers[0] if numbers else ""
 
 def clean_key_val(val):
-    """Normalize string for robust matching"""
     if pd.isna(val) or str(val).lower() == 'nan':
         return ""
     val_str = str(val).strip()
-    # Check if 10 digit number
     num = extract_numbers(val_str)
     if num:
         return num
@@ -52,10 +70,13 @@ def extract_field(pattern, text):
 def parse_slide_content(full_text):
     text = " ".join(full_text.split())
 
-    split_parts = re.split(r'\b(Address\s*:|Contact\s*No\s*:|Contact\s*:|District\s*:|Size\s*:|Media\s*Type\s*:)\b', text, flags=re.IGNORECASE)
-    pure_outlet_name = split_parts[0].strip()
-    pure_outlet_name = re.sub(r'^(Outlet Name|Dealer Name|Shop Name|Party Name)\s*:\s*', '', pure_outlet_name, flags=re.IGNORECASE).strip()
+    # Strictly Clean Outlet Name: Truncate everything starting from any key label
+    clean_name = re.split(r'\s*(?:Address\s*:|Contact\s*No\s*:|Contact\s*:|District\s*:|Size\s*:|Media\s*Type\s*:|Remarks\s*:|Qty\s*:|s_no\s*:|SAP\s*Code\s*:|SAP\s*:)', text, flags=re.IGNORECASE)[0].strip()
+    
+    # Remove initial label prefixes if present
+    pure_outlet_name = re.sub(r'^(Outlet Name|Dealer Name|Shop Name|Party Name)\s*:\s*', '', clean_name, flags=re.IGNORECASE).strip()
 
+    # Extract Individual Fields safely
     contact_no = extract_numbers(text)
     address = extract_field(r'Address\s*:\s*(.*?)(?=\s*(?:Contact|District|Size|Media|Remarks|Qty|s_no|SAP|$))', text)
     district = extract_field(r'District\s*:\s*([A-Za-z0-9\s\-_]+?)(?=\s*(?:Size|Media|Remarks|Qty|s_no|Contact|Address|SAP|$))', text)
@@ -108,6 +129,14 @@ def process_ppt_data(ppt_file):
 
     return pd.DataFrame(ppt_records)
 
+def auto_select_index(options, keywords):
+    for idx, opt in enumerate(options):
+        opt_clean = str(opt).lower().replace("_", " ").replace(".", " ").strip()
+        for kw in keywords:
+            if kw in opt_clean:
+                return idx
+    return 0
+
 # Execution Flow
 if uploaded_excel and uploaded_ppt:
     try:
@@ -125,34 +154,36 @@ if uploaded_excel and uploaded_ppt:
 
         st.markdown("---")
         st.subheader("🎯 Configure Multi-Key Matching Criteria (Up to 4 Fields)")
-        st.caption("Select matching columns between Excel and PPT to create a composite unique matching key.")
 
         excel_columns = ["-- Ignore --"] + list(df_excel.columns)
         ppt_columns = ["-- Ignore --"] + list(df_ppt.columns)
+
+        def_ex_1 = auto_select_index(excel_columns, ["dealer / name", "dealer name", "outlet name", "name"])
+        def_ex_2 = auto_select_index(excel_columns, ["dealer/ contact", "dealer contact", "contact", "mobile"])
+        def_ex_3 = auto_select_index(excel_columns, ["w", "width", "size"])
 
         col_a, col_b, col_c, col_d = st.columns(4)
 
         with col_a:
             st.markdown("**Key 1 (Primary)**")
-            ex_key1 = st.selectbox("Excel Col 1", options=excel_columns, key="ex1", index=1 if len(excel_columns)>1 else 0)
-            ppt_key1 = st.selectbox("PPT Col 1", options=ppt_columns, key="ppt1", index=ppt_columns.index("PPT_Outlet_Name") if "PPT_Outlet_Name" in ppt_columns else 0)
+            ex_key1 = st.selectbox("Excel Col 1", options=excel_columns, index=def_ex_1, key="ex1")
+            ppt_key1 = st.selectbox("PPT Col 1", options=ppt_columns, index=ppt_columns.index("PPT_Outlet_Name") if "PPT_Outlet_Name" in ppt_columns else 0, key="ppt1")
 
         with col_b:
             st.markdown("**Key 2**")
-            ex_key2 = st.selectbox("Excel Col 2", options=excel_columns, key="ex2")
-            ppt_key2 = st.selectbox("PPT Col 2", options=ppt_columns, key="ppt2", index=ppt_columns.index("PPT_Contact") if "PPT_Contact" in ppt_columns else 0)
+            ex_key2 = st.selectbox("Excel Col 2", options=excel_columns, index=def_ex_2, key="ex2")
+            ppt_key2 = st.selectbox("PPT Col 2", options=ppt_columns, index=ppt_columns.index("PPT_Contact") if "PPT_Contact" in ppt_columns else 0, key="ppt2")
 
         with col_c:
             st.markdown("**Key 3**")
-            ex_key3 = st.selectbox("Excel Col 3", options=excel_columns, key="ex3")
-            ppt_key3 = st.selectbox("PPT Col 3", options=ppt_columns, key="ppt3", index=ppt_columns.index("PPT_Size") if "PPT_Size" in ppt_columns else 0)
+            ex_key3 = st.selectbox("Excel Col 3", options=excel_columns, index=def_ex_3, key="ex3")
+            ppt_key3 = st.selectbox("PPT Col 3", options=ppt_columns, index=ppt_columns.index("PPT_Size") if "PPT_Size" in ppt_columns else 0, key="ppt3")
 
         with col_d:
             st.markdown("**Key 4**")
             ex_key4 = st.selectbox("Excel Col 4", options=excel_columns, key="ex4")
             ppt_key4 = st.selectbox("PPT Col 4", options=ppt_columns, key="ppt4")
 
-        # Gather Selected Mapping Rules
         mapping_rules = []
         if ex_key1 != "-- Ignore --" and ppt_key1 != "-- Ignore --":
             mapping_rules.append((ex_key1, ppt_key1))
@@ -169,19 +200,16 @@ if uploaded_excel and uploaded_ppt:
             if st.button("▶️ Process & Append PPT Data into Excel", type="primary", use_container_width=True):
                 with st.spinner("Creating composite keys and matching records..."):
                     
-                    # Generate Composite Excel Key
                     excel_key_series = pd.Series([""] * len(df_excel), index=df_excel.index)
                     for ex_col, _ in mapping_rules:
                         excel_key_series += df_excel[ex_col].apply(clean_key_val) + "_"
                     df_excel['composite_match_key'] = excel_key_series
 
-                    # Generate Composite PPT Key
                     ppt_key_series = pd.Series([""] * len(df_ppt), index=df_ppt.index)
                     for _, ppt_col in mapping_rules:
                         ppt_key_series += df_ppt[ppt_col].apply(clean_key_val) + "_"
                     df_ppt['composite_match_key'] = ppt_key_series
 
-                    # Append PPT fields as NEW columns into Excel
                     ppt_target_cols = [c for c in df_ppt.columns if c not in ['composite_match_key']]
                     
                     for target in ppt_target_cols:
@@ -189,14 +217,12 @@ if uploaded_excel and uploaded_ppt:
                         new_col_name = f"Matched_{target}" if target in df_excel.columns else target
                         df_excel[new_col_name] = df_excel['composite_match_key'].map(mapping_dict).fillna("Not Found / No Match" if target == "PPT_Status" else "")
 
-                    # Clean up temporary matching key column
                     df_final = df_excel.drop(columns=['composite_match_key'])
 
                     st.success("✅ Matching successfully completed!")
                     st.subheader("📋 Updated Excel Preview (With New PPT Columns)")
                     st.dataframe(df_final, use_container_width=True)
 
-                    # Export File
                     output = io.BytesIO()
                     with pd.ExcelWriter(output, engine='openpyxl') as writer:
                         df_final.to_excel(writer, index=False)
