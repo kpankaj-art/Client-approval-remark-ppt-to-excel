@@ -2,3 +2,5 @@ streamlit
 python-pptx
 pandas
 openpyxl
+xlrd
+pyxlsb
