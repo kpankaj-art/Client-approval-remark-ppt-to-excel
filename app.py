@@ -48,34 +48,45 @@ def extract_numbers(text):
 def clean_str(val):
     return re.sub(r'[^a-zA-Z0-9]', '', str(val)).lower().strip()
 
+def clean_outlet_name(raw_name):
+    """
+    Strips out any trailing key-value metadata from the name string.
+    Guarantees pure Outlet/Dealer name output.
+    """
+    if not raw_name:
+        return ""
+    
+    # Cut everything starting from keywords like Address:, Contact, District:, Size:, etc.
+    split_pattern = r'\b(Address\s*:|Contact\s*No\s*:|Contact\s*:|District\s*:|Size\s*:|Media\s*Type\s*:|Remarks\s*:|Qty\s*:|s_no\s*:|SAP\s*Code\s*:|SAP\s*:)\b'
+    clean_name = re.split(split_pattern, raw_name, flags=re.IGNORECASE)[0].strip()
+
+    # Strip prefix labels if present
+    clean_name = re.sub(r'^(Outlet Name|Dealer Name|Shop Name|Party Name)\s*:\s*', '', clean_name, flags=re.IGNORECASE).strip()
+    return clean_name
+
 def parse_dynamic_text(raw_text):
     """
-    Splits combined text frame into clean Outlet Name, Address, Contact, District, Size, Media Type, etc.
+    Splits text frame into clean Outlet Name, Address, Contact, District, Size, Media Type, etc.
     """
     text = " ".join(raw_text.split())
 
-    # 1. Extract Pure Outlet Name (Everything BEFORE 'Address:' or 'Contact' or 'District')
-    # This ensures "RAJ TRADING COMPANY" is clean and separated from "Address: Mahari khawa..."
-    name_split = re.split(r'\b(Address:|Contact\s*No:|Contact:|District:|Size:|Media\s*Type:|SAP\s*Code:|SAP:)\b', text, flags=re.IGNORECASE)
-    pure_outlet_name = name_split[0].strip()
-    
-    # Remove prefixes like "Outlet Name:", "Dealer Name:", "Shop Name:"
-    pure_outlet_name = re.sub(r'^(Outlet Name:|Dealer Name:|Shop Name:|Party Name:)\s*', '', pure_outlet_name, flags=re.IGNORECASE).strip()
-
-    # 2. Extract 10-Digit Mobile Number
+    # Extract 10-Digit Mobile Number
     contact_no = extract_numbers(text)
 
-    # Helper function for Regex Extraction of other fields
+    # Helper function for Regex Extraction of individual fields
     def extract_field(pattern):
         match = re.search(pattern, text, re.IGNORECASE)
         return match.group(1).strip() if match else ""
 
-    # 3. Extract Individual Fields
-    address = extract_field(r'Address:\s*(.*?)(?=\s*(?:Contact|District|Size|Media|Remarks|Qty|s_no|SAP|$))')
-    district = extract_field(r'District:\s*([A-Za-z0-9\s\-_]+?)(?=\s*(?:Size|Media|Remarks|Qty|s_no|Contact|Address|SAP|$))')
-    size = extract_field(r'Size:\s*([0-9X\s]+?)(?=\s*(?:Media|Remarks|Qty|s_no|District|Contact|Address|SAP|$))')
-    media_type = extract_field(r'Media\s*Type:\s*([A-Za-z0-9\s\-_]+?)(?=\s*(?:Remarks|Qty|s_no|District|Size|Contact|Address|SAP|$))')
-    sap_code = extract_field(r'SAP\s*(?:Code)?:\s*([A-Za-z0-9]+?)(?=\s*(?:Address|Contact|District|Size|Media|Remarks|$))')
+    # Extract Individual Fields
+    address = extract_field(r'Address\s*:\s*(.*?)(?=\s*(?:Contact|District|Size|Media|Remarks|Qty|s_no|SAP|$))')
+    district = extract_field(r'District\s*:\s*([A-Za-z0-9\s\-_]+?)(?=\s*(?:Size|Media|Remarks|Qty|s_no|Contact|Address|SAP|$))')
+    size = extract_field(r'Size\s*:\s*([0-9X\s]+?)(?=\s*(?:Media|Remarks|Qty|s_no|District|Contact|Address|SAP|$))')
+    media_type = extract_field(r'Media\s*Type\s*:\s*([A-Za-z0-9\s\-_]+?)(?=\s*(?:Remarks|Qty|s_no|District|Size|Contact|Address|SAP|$))')
+    sap_code = extract_field(r'SAP\s*(?:Code)?\s*:\s*([A-Za-z0-9]+?)(?=\s*(?:Address|Contact|District|Size|Media|Remarks|$))')
+
+    # Strict Pure Outlet Name Cleaning
+    pure_outlet_name = clean_outlet_name(text)
 
     return {
         "PPT_Outlet_Name": pure_outlet_name,
@@ -201,7 +212,7 @@ if uploaded_excel and uploaded_ppt:
                         use_container_width=True
                     )
                 else:
-                    st.error("Could not auto-detect Name or Contact column in Excel. Please verify that your uploaded Excel sheet contains column headers like 'Dealer Name' or 'Contact No'.")
+                    st.error("Could not auto-detect Name or Contact column in Excel. Please verify sheet headers.")
 
             except Exception as e:
                 st.error(f"Error processing files: {e}")
