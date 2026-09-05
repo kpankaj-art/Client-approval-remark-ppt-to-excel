@@ -9,26 +9,30 @@ st.set_page_config(page_title="PPT Extra Tag & Excel Matcher", page_icon="🏷�
 st.title("🏷️ Smart PPT Extra Tag Extractor & Excel Matcher")
 st.write("Ye tool PPT me image ke pass likhe 'OK', 'Approved' jaise floating tags ko automatic pehchan kar Excel me sahi row me attach kar dega.")
 
-# Updated File Uploader: Support for all Excel formats (.xlsx, .xls, .xlsm, .xlsb, .csv)
+# Format options for all types of Excel & CSV files
 uploaded_excel = st.file_uploader(
-    "1. Excel File Upload Karein (.xlsx, .xls, .xlsm, .xlsb, .csv)", 
+    "1. Excel / CSV File Upload Karein (.xlsx, .xls, .xlsm, .xlsb, .csv)", 
     type=["xlsx", "xls", "xlsm", "xlsb", "csv"]
 )
 uploaded_ppt = st.file_uploader("2. PPT File Upload Karein (.pptx)", type=["pptx"])
 
 def load_excel_file(file):
-    """Har tarah ke Excel aur CSV formats ko load karne ke liye helper function"""
+    """Har tarah ke Excel (.xlsx, .xls, .xlsm, .xlsb) aur .csv formats ko safe tarike se read karne ke liye"""
     filename = file.name.lower()
+    
     if filename.endswith('.csv'):
         return pd.read_csv(file)
     elif filename.endswith('.xlsb'):
         return pd.read_excel(file, engine='pyxlsb')
+    elif filename.endswith('.xls'):
+        try:
+            return pd.read_excel(file, engine='xlrd')
+        except Exception:
+            return pd.read_excel(file)
     else:
-        # Handles .xlsx, .xls, .xlsm automatically
         return pd.read_excel(file)
 
 def find_column(df, keywords):
-    """Excel me dynamic column names dhundne ka function"""
     for col in df.columns:
         col_clean = str(col).lower().replace("_", " ").strip()
         for kw in keywords:
@@ -37,7 +41,6 @@ def find_column(df, keywords):
     return None
 
 def extract_numbers(text):
-    """10-digit phone number extract karne ke liye"""
     numbers = re.findall(r'\b\d{10}\b', str(text))
     return numbers[0] if numbers else ""
 
@@ -48,7 +51,6 @@ def process_ppt_data(ppt_file):
     prs = Presentation(ppt_file)
     ppt_records = []
 
-    # Standard labels jo slide layout ka hissa hote hain (Inhe ignore karenge extra tag dhundne ke liye)
     standard_labels = [
         "outlet name", "dealer name", "shop name", "address", 
         "contact no", "district", "media type", "size", "qty", "remarks", "s_no"
@@ -66,30 +68,25 @@ def process_ppt_data(ppt_file):
 
                 text_lower = text.lower()
 
-                # 1. Outlet Name Extract
                 if "outlet name:" in text_lower or "dealer name:" in text_lower:
                     outlet_name = re.sub(r'^(Outlet Name:|Dealer Name:|Shop Name:)', '', text, flags=re.IGNORECASE).strip()
 
-                # 2. Contact Number Extract
                 elif "contact no:" in text_lower or "contact" in text_lower:
                     found_num = extract_numbers(text)
                     if found_num:
                         contact_no = found_num
 
-                # 3. Size Extract (e.g., Size: 360X48)
                 elif "size:" in text_lower:
                     size_text = text.split(":")[-1].strip().upper()
                     size_parts = re.findall(r'\d+', size_text)
                     if len(size_parts) >= 2:
                         size_w, size_h = size_parts[0], size_parts[1]
 
-                # 4. Extra Tag / Floating Status Text Detection (jaise "OK", "approved", etc.)
                 else:
                     is_standard = any(label in text_lower for label in standard_labels)
-                    if not is_standard and len(text) <= 30:  # Chhota tag text
+                    if not is_standard and len(text) <= 30:
                         extra_tags.append(text)
 
-        # Agar shape text me contact na mil sake to full slide check karein
         if not contact_no:
             full_text = " ".join([s.text_frame.text for s.text_frame in slide.shapes if s.has_text_frame])
             found_num = extract_numbers(full_text)
@@ -111,27 +108,23 @@ def process_ppt_data(ppt_file):
 
 if uploaded_excel and uploaded_ppt:
     try:
-        # Load Excel using all-format helper
         df_excel = load_excel_file(uploaded_excel)
         df_ppt = process_ppt_data(uploaded_ppt)
 
         st.subheader("PPT Extracted Data (Extra Status Tags Ke Sath)")
         st.dataframe(df_ppt)
 
-        # Column Auto-Detection in Excel
         name_col = find_column(df_excel, ["dealer name", "shop name", "outlet name", "client name", "name"])
         contact_col = find_column(df_excel, ["dealer contact", "contact no", "contact", "mobile no", "phone"])
         width_col = find_column(df_excel, ["width", "w"])
         height_col = find_column(df_excel, ["height", "h"])
 
         if name_col and contact_col:
-            # Excel & PPT ke data cleaning
             df_excel['clean_name'] = df_excel[name_col].apply(clean_str)
             df_excel['clean_contact'] = df_excel[contact_col].astype(str).str.extract(r'(\d{10})').fillna('')
             df_excel['clean_w'] = df_excel[width_col].astype(str).str.extract(r'(\d+)').fillna('') if width_col else ''
             df_excel['clean_h'] = df_excel[height_col].astype(str).str.extract(r'(\d+)').fillna('') if height_col else ''
 
-            # Key for 3-Level Matching (Name + Contact + Width + Height)
             df_excel['match_key'] = (
                 df_excel['clean_name'] + "_" + 
                 df_excel['clean_contact'] + "_" + 
@@ -151,17 +144,14 @@ if uploaded_excel and uploaded_ppt:
                 df_ppt['clean_h']
             )
 
-            # Map Status to Excel
             status_dict = dict(zip(df_ppt['match_key'], df_ppt['PPT_Status']))
             df_excel['PPT_Status'] = df_excel['match_key'].map(status_dict).fillna("Not Found / No Match")
 
-            # Final Cleanup
             df_final = df_excel.drop(columns=['clean_name', 'clean_contact', 'clean_w', 'clean_h', 'match_key'])
 
             st.success("✅ Matching Complete! Naya Status Column Update Ho Gaya Hai.")
             st.dataframe(df_final.head(15))
 
-            # Download File Preparation
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df_final.to_excel(writer, index=False)
