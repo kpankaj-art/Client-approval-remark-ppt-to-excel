@@ -86,8 +86,8 @@ def similarity(a, b):
 # -----------------------------
 ALIASES = {
     "name": ["dealer/name", "dealer name", "outlet name", "outlet", "dealer", "customer name", "shop name", "party name", "name"],
-    "address": ["dealer/address", "dealer address", "address", "outlet address", "location"],
-    "contact": ["mobile no.", "mobile no", "mobile", "contact no", "contact", "phone no", "phone", "mobile number", "contact number"],
+    "address": ["dealer/address", "dealer address", "dealer adderess", "dealer/adderess", "address", "outlet address", "location"],
+    "contact": ["mobile no.", "mobile no", "mobile", "contact no", "contact", "dealer/contact", "dealer contact", "dealer/contact no", "phone no", "phone", "mobile number", "contact number"],
     "district": ["district name", "district"],
     "type": ["media type", "media", "type", "media_type"],
     "qty": ["qty", "quantity", "qnty"],
@@ -142,15 +142,28 @@ EXCLUDED_LABELS = {
 }
 
 def slide_texts(slide):
+    """Read text from normal shapes, grouped shapes and tables."""
     texts = []
-    for shape in slide.shapes:
-        if hasattr(shape, "text") and shape.text and shape.text.strip():
-            texts.append(shape.text.strip())
+
+    def walk(shape):
+        # Grouped shapes can contain the actual remark/annotation box.
+        if getattr(shape, "shape_type", None) == 6:  # MSO_SHAPE_TYPE.GROUP
+            for child in shape.shapes:
+                walk(child)
+            return
+
         if getattr(shape, "has_table", False):
             for row in shape.table.rows:
                 for cell in row.cells:
                     if cell.text and cell.text.strip():
                         texts.append(cell.text.strip())
+
+        if hasattr(shape, "text") and shape.text and shape.text.strip():
+            texts.append(shape.text.strip())
+
+    for shape in slide.shapes:
+        walk(shape)
+
     return texts
 
 def extract_ppt_record(slide):
@@ -299,11 +312,15 @@ def clean_remark(s):
 
 def get_remarks(explicit, all_texts):
     """
-    Extract additional/unlabelled client remark text.
+    Detect additional client remarks/annotations anywhere on the PPT slide.
 
-    Explicit 'Remarks:' content is NOT returned here because it is now written
-    separately into the dedicated 'PPT Remarks' column.
-    The s_no field and its immediate value are always ignored.
+    Explicit Remarks/Comments/Observation values are stored separately in
+    'PPT Remarks'. This function handles other meaningful text.
+
+    IMPORTANT:
+    - 's_no' itself is a PPT template field and is ignored.
+    - The value beside/after s_no is NOT automatically discarded.
+    - Known structural fields are excluded.
     """
     result = []
 
@@ -311,16 +328,23 @@ def get_remarks(explicit, all_texts):
         value = clean_remark(value)
         if not value:
             return
+
         key = clean_text(value).rstrip(":").strip()
+
+        # Ignore structural labels only.
         if key in EXCLUDED_LABELS:
             return
+
+        # Ignore complete structural label lines.
         if re.match(
             r"^(outlet name|dealer name|address|contact(?: no| number)?|"
             r"mobile(?: no| number)?|district|size|media type|qty|quantity|"
-            r"remarks?|comments?|observation)\s*[:\-]?\s*$",
+            r"remarks?|comments?|observation|s_no|s no|s\.no|sr no|sr\.no)"
+            r"\s*[:\-]?\s*$",
             value, re.I
         ):
             return
+
         if value not in result:
             result.append(value)
 
@@ -331,15 +355,6 @@ def get_remarks(explicit, all_texts):
             if x:
                 lines.append(x)
 
-    # Ignore s_no and its immediate value because both are PPT template content.
-    ignored_indexes = set()
-    for i, line in enumerate(lines):
-        compact = clean_text(line).replace(".", "").replace("_", "").replace(" ", "")
-        if compact in {"sno", "srno"}:
-            ignored_indexes.add(i)
-            if i + 1 < len(lines):
-                ignored_indexes.add(i + 1)
-
     field_label_re = re.compile(
         r"^(outlet name|dealer name|address|dealer address|"
         r"contact(?: no| number)?|mobile(?: no| number)?|district|"
@@ -349,9 +364,9 @@ def get_remarks(explicit, all_texts):
         re.I
     )
 
-    # Unlabelled text is kept as Client Remark candidates.
-    for i, line in enumerate(lines):
-        if i in ignored_indexes:
+    # Only the s_no label is ignored. Do not ignore the following value.
+    for line in lines:
+        if clean_text(line).replace(".", "").replace("_", "").replace(" ", "") in {"sno", "srno"}:
             continue
         if field_label_re.match(line):
             continue
@@ -472,7 +487,7 @@ if excel_file and ppt_file:
                     second_score = candidates[1][0] if len(candidates) > 1 else 0
 
                     # Strong enough, or clearly better than second candidate.
-                    confident = best_score >= 72 or (best_score >= 58 and best_score - second_score >= 12)
+                    confident = best_score >= 0.72 or (best_score >= 0.58 and best_score - second_score >= 0.12)
                     if not confident:
                         unmatched.append((slide_no, rec, f"Low confidence ({best_score:.1f}%)"))
                         continue
@@ -524,7 +539,7 @@ if "result" in st.session_state:
 
     with st.expander("📋 Match report"):
         report = pd.DataFrame([
-            {"PPT Slide": m["slide"], "Excel Row": m["excel_index"] + 2, "Name": m["name"], "Match Score": f'{m["score"]:.1f}%', "PPT Remarks": " | ".join(m.get("ppt_remarks", [])) or "None", "Client Remark": " | ".join(m["remarks"]) or "None"}
+            {"PPT Slide": m["slide"], "Excel Row": m["excel_index"] + 2, "Name": m["name"], "Match Score": f'{m["score"] * 100:.1f}%', "PPT Remarks": " | ".join(m.get("ppt_remarks", [])) or "None", "Other Client Remark": " | ".join(m["remarks"]) or "None"}
             for m in matches
         ])
         if not report.empty:
