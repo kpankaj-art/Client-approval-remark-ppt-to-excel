@@ -208,6 +208,17 @@ def extract_ppt_record(slide):
 
     return rec, list(dict.fromkeys(explicit_remarks)), texts
 
+
+def get_ppt_remarks(explicit):
+    """Return only text explicitly written against Remarks/Remark fields."""
+    result = []
+    for x in explicit:
+        x = clean_remark(x)
+        if x and x not in result:
+            result.append(x)
+    return result
+
+
 # -----------------------------
 # Row matching
 # -----------------------------
@@ -287,16 +298,71 @@ def clean_remark(s):
     return s
 
 def get_remarks(explicit, all_texts):
-    # Explicit Remarks: values are highest-confidence.
-    result = []
-    for x in explicit:
-        x = clean_remark(x)
-        if x and x not in result:
-            result.append(x)
+    """
+    Extract additional/unlabelled client remark text.
 
-    # Do not automatically treat standard structural fields as remarks.
-    # Random unlabelled text is intentionally left for the future OCR/AI layer.
+    Explicit 'Remarks:' content is NOT returned here because it is now written
+    separately into the dedicated 'PPT Remarks' column.
+    The s_no field and its immediate value are always ignored.
+    """
+    result = []
+
+    def add(value):
+        value = clean_remark(value)
+        if not value:
+            return
+        key = clean_text(value).rstrip(":").strip()
+        if key in EXCLUDED_LABELS:
+            return
+        if re.match(
+            r"^(outlet name|dealer name|address|contact(?: no| number)?|"
+            r"mobile(?: no| number)?|district|size|media type|qty|quantity|"
+            r"remarks?|comments?|observation)\s*[:\-]?\s*$",
+            value, re.I
+        ):
+            return
+        if value not in result:
+            result.append(value)
+
+    lines = []
+    for text in all_texts:
+        for x in str(text).splitlines():
+            x = x.strip()
+            if x:
+                lines.append(x)
+
+    # Ignore s_no and its immediate value because both are PPT template content.
+    ignored_indexes = set()
+    for i, line in enumerate(lines):
+        compact = clean_text(line).replace(".", "").replace("_", "").replace(" ", "")
+        if compact in {"sno", "srno"}:
+            ignored_indexes.add(i)
+            if i + 1 < len(lines):
+                ignored_indexes.add(i + 1)
+
+    field_label_re = re.compile(
+        r"^(outlet name|dealer name|address|dealer address|"
+        r"contact(?: no| number)?|mobile(?: no| number)?|district|"
+        r"size|dimensions?|media type|media|type|qty|quantity|"
+        r"remarks?|client remarks?|comments?|observation|"
+        r"s_no|s no|s\.no|sr no|sr\.no)\s*[:\-]?",
+        re.I
+    )
+
+    # Unlabelled text is kept as Client Remark candidates.
+    for i, line in enumerate(lines):
+        if i in ignored_indexes:
+            continue
+        if field_label_re.match(line):
+            continue
+        if re.fullmatch(r"[\d\W_]+", line):
+            continue
+        if len(line) > 180:
+            continue
+        add(line)
+
     return result
+
 
 # -----------------------------
 # Excel IO
@@ -314,17 +380,29 @@ def read_excel(uploaded):
 def build_output(df, matches):
     out = df.copy()
     # Create enough columns for multiple remarks.
+    # Dedicated column for the exact PPT 'Remarks:' field.
+    if "PPT Remarks" not in out.columns:
+        out["PPT Remarks"] = ""
+
+    # Client Remark columns remain separate for additional/unlabelled remarks.
     max_r = max([len(x["remarks"]) for x in matches], default=0)
     ncols = max(1, max_r)
     for i in range(ncols):
         col = "Client Remark" if i == 0 else f"Client Remark {i+1}"
         if col not in out.columns:
             out[col] = ""
+
     for m in matches:
         idx = m["excel_index"]
+
+        ppt_text = " | ".join(m.get("ppt_remarks", []))
+        if ppt_text:
+            out.at[idx, "PPT Remarks"] = ppt_text
+
         for i, remark in enumerate(m["remarks"]):
             col = "Client Remark" if i == 0 else f"Client Remark {i+1}"
             out.at[idx, col] = remark
+
     return out
 
 # -----------------------------
@@ -399,12 +477,14 @@ if excel_file and ppt_file:
                         unmatched.append((slide_no, rec, f"Low confidence ({best_score:.1f}%)"))
                         continue
 
+                    ppt_remarks = get_ppt_remarks(explicit)
                     remarks = get_remarks(explicit, texts)
                     used.add(best_row["_excel_index"])
                     matches.append({
                         "slide": slide_no,
                         "excel_index": best_row["_excel_index"],
                         "score": best_score,
+                        "ppt_remarks": ppt_remarks,
                         "remarks": remarks,
                         "name": rec["name"],
                     })
@@ -430,6 +510,7 @@ if "result" in st.session_state:
     cols = st.session_state["cols"]
 
     st.success(f"Completed. {len(matches)} PPT record(s) matched successfully.")
+    st.info("PPT Remarks is a separate column containing exactly what is written in the PPT Remarks/Remark field. The s_no field and its value are always ignored because they are PPT template content. Additional meaningful unlabelled text may be detected separately as Client Remark.")
     st.download_button(
         "⬇️ Download Updated Excel",
         data=st.session_state["result"],
@@ -443,7 +524,7 @@ if "result" in st.session_state:
 
     with st.expander("📋 Match report"):
         report = pd.DataFrame([
-            {"PPT Slide": m["slide"], "Excel Row": m["excel_index"] + 2, "Name": m["name"], "Match Score": f'{m["score"]:.1f}%', "Remarks Found": " | ".join(m["remarks"]) or "None"}
+            {"PPT Slide": m["slide"], "Excel Row": m["excel_index"] + 2, "Name": m["name"], "Match Score": f'{m["score"]:.1f}%', "PPT Remarks": " | ".join(m.get("ppt_remarks", [])) or "None", "Client Remark": " | ".join(m["remarks"]) or "None"}
             for m in matches
         ])
         if not report.empty:
