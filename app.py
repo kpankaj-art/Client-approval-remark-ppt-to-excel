@@ -940,16 +940,10 @@ if "result" in st.session_state:
 
     st.success(f"Completed. {len(matches)} PPT record(s) matched successfully.")
     st.info("PPT Remarks is a separate column containing exactly what is written in the PPT Remarks/Remark field. The s_no field and its value are always ignored because they are PPT template content. Additional meaningful unlabelled text may be detected separately as Client Remark.")
-    # Keep the uploaded Excel filename and add "_Updated" before the extension.
-    # Example: Client_Data.xlsx -> Client_Data_Updated.xlsx
-    original_excel_name = excel_file.name
-    original_stem = Path(original_excel_name).stem
-    download_name = f"{original_stem}_Updated.xlsx"
-
     st.download_button(
         "⬇️ Download Updated Excel",
         data=st.session_state["result"],
-        file_name=download_name,
+        file_name="Updated_Client_Remarks.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
