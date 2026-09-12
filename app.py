@@ -652,13 +652,15 @@ def get_remarks(explicit, all_texts):
     """
     Detect additional client remarks/annotations anywhere on the PPT slide.
 
-    Explicit Remarks/Comments/Observation values are stored separately in
-    'PPT Remarks'. This function handles other meaningful text.
+    The PPT contains several pieces of information that are already present in
+    the Excel master and therefore MUST NOT become Client Remark, including:
+      - SAP Code / SAP CODE Added
+      - brand-selection text such as "Bangur, Magna", "SC, Magna", "RC, Magna"
+      - all normal record fields
+      - s_no / slide-template content
 
-    IMPORTANT:
-    - 's_no' itself is a PPT template field and is ignored.
-    - The value beside/after s_no is NOT automatically discarded.
-    - Known structural fields are excluded.
+    Actual free-form annotations such as "ok", "Ok GSB", "OK only NLB",
+    "NO, Sale is not for GSB" remain candidates for Client Remark.
     """
     result = []
 
@@ -667,20 +669,62 @@ def get_remarks(explicit, all_texts):
         if not value:
             return
 
-        key = clean_text(value).rstrip(":").strip()
+        low = clean_text(value).lower()
+        compact = re.sub(r"[^a-z0-9]+", "", low)
 
-        # Ignore structural labels only.
-        if key in EXCLUDED_LABELS:
-            return
-
-        # Ignore complete structural label lines.
+        # Never copy information that is already represented by master fields.
         if re.match(
-            r"^(outlet name|dealer name|address|contact(?: no| number)?|"
-            r"mobile(?: no| number)?|district|size|media type|qty|quantity|"
-            r"remarks?|comments?|observation|s_no|s no|s\.no|sr no|sr\.no)"
-            r"\s*[:\-]?\s*$",
+            r"^\s*(sap\s*code|sapcode|customer\s*code|dealer\s*code|party\s*code)"
+            r"\s*[:\-]?\s*.*$",
             value, re.I
         ):
+            return
+
+        if re.match(r"^\s*sap\s*code\s*added\s*$", value, re.I):
+            return
+
+        # Brand/template selection lines seen in the uploaded PPTs.
+        # These are not client remarks and are already represented elsewhere
+        # in the master workbook.
+        brand_template_patterns = [
+            r"^(bangur\s*,?\s*magna)$",
+            r"^(sc\s*,?\s*magna)$",
+            r"^(rc\s*,?\s*magna)$",
+            r"^(sc\s*,?\s*magna\s*)$",
+            r"^(bangur\s+magna)$",
+            r"^(rc\s+magna)$",
+        ]
+        if any(re.fullmatch(pat, low, re.I) for pat in brand_template_patterns):
+            return
+
+        # Ignore structural labels.
+        if compact in {
+            "outletname", "dealername", "address", "dealeraddress",
+            "contact", "contactno", "contactnumber", "mobile", "mobileno",
+            "mobilenumber", "district", "size", "dimensions", "mediatype",
+            "media", "type", "qty", "quantity", "remarks", "remark",
+            "clientremark", "clientremarks", "comments", "observation",
+            "sno", "srno"
+        }:
+            return
+
+        # Ignore complete structural label/value lines.
+        if re.match(
+            r"^(outlet name|dealer name|address|dealer address|"
+            r"contact(?: no| number)?|mobile(?: no| number)?|district|"
+            r"size|dimensions?|media type|media|type|qty|quantity|"
+            r"remarks?(?:\s*,?\s*if\s+any)?|client remarks?|comments?|"
+            r"observation|s_no|s no|s\.no|sr no|sr\.no)\s*[:\-]",
+            value, re.I
+        ):
+            return
+
+        # GPS/coordinate metadata, slide numbering, and pure numeric strings
+        # are not client remarks.
+        if re.fullmatch(r"[\d\W_]+", value):
+            return
+
+        if len(value) > 180:
             return
 
         if value not in result:
@@ -697,21 +741,24 @@ def get_remarks(explicit, all_texts):
         r"^(outlet name|dealer name|address|dealer address|"
         r"contact(?: no| number)?|mobile(?: no| number)?|district|"
         r"size|dimensions?|media type|media|type|qty|quantity|"
-        r"remarks?|client remarks?|comments?|observation|"
-        r"s_no|s no|s\.no|sr no|sr\.no)\s*[:\-]?",
+        r"remarks?(?:\s*,?\s*if\s+any)?|client remarks?|comments?|"
+        r"observation|s_no|s no|s\.no|sr no|sr\.no|"
+        r"sap\s*code|sapcode|customer\s*code|dealer\s*code|party\s*code)"
+        r"\s*[:\-]?",
         re.I
     )
 
-    # Only the s_no label is ignored. Do not ignore the following value.
     for line in lines:
-        if clean_text(line).replace(".", "").replace("_", "").replace(" ", "") in {"sno", "srno"}:
+        compact_line = clean_text(line).replace(".", "").replace("_", "").replace(" ", "").lower()
+
+        # s_no is always template content.
+        if compact_line in {"sno", "srno"}:
             continue
+
+        # All standard fields are not free-form client remarks.
         if field_label_re.match(line):
             continue
-        if re.fullmatch(r"[\d\W_]+", line):
-            continue
-        if len(line) > 180:
-            continue
+
         add(line)
 
     return result
@@ -893,10 +940,16 @@ if "result" in st.session_state:
 
     st.success(f"Completed. {len(matches)} PPT record(s) matched successfully.")
     st.info("PPT Remarks is a separate column containing exactly what is written in the PPT Remarks/Remark field. The s_no field and its value are always ignored because they are PPT template content. Additional meaningful unlabelled text may be detected separately as Client Remark.")
+    # Keep the uploaded Excel filename and add "_Updated" before the extension.
+    # Example: Client_Data.xlsx -> Client_Data_Updated.xlsx
+    original_excel_name = excel_file.name
+    original_stem = Path(original_excel_name).stem
+    download_name = f"{original_stem}_Updated.xlsx"
+
     st.download_button(
         "⬇️ Download Updated Excel",
         data=st.session_state["result"],
-        file_name="Updated_Client_Remarks.xlsx",
+        file_name=download_name,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
