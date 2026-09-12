@@ -104,6 +104,7 @@ ALIASES = {
     "qty": ["qty", "quantity", "qnty"],
     "width": ["w", "width", "w width", "width (0)", "widht"],
     "height": ["h", "height", "h height", "height (0)", "hight"],
+    "sap": ["sap code", "sapcode", "sap", "customer code", "dealer code", "party code"],
 }
 
 def header_key(h):
@@ -224,35 +225,178 @@ def score_column_by_data(series, field):
 
     return 0.0
 
-def infer_columns(df):
-    """
-    Detect columns from their DATA first, not their headings.
+def ppt_excel_similarity(field, ppt_value, excel_value):
+    """Compare one PPT value against one Excel cell for column discovery."""
+    if ppt_value in (None, "") or excel_value in (None, ""):
+        return 0.0
 
-    We solve one-to-one assignment greedily with small header tie-breakers.
-    Width/height are expected to be numeric columns, contact is phone-like,
-    type is a short media-code column, etc.
+    if field == "contact":
+        a, b = phone_numbers(ppt_value), phone_numbers(excel_value)
+        return 1.0 if set(a) & set(b) else 0.0
+
+    if field == "sap":
+        a = re.sub(r"\D", "", str(ppt_value))
+        b = re.sub(r"\D", "", str(excel_value))
+        return 1.0 if a and b and a == b else 0.0
+
+    if field == "size":
+        a, b = parse_size(ppt_value), parse_size(excel_value)
+        return 1.0 if a and b and a == b else 0.0
+
+    if field == "width":
+        a = parse_size(ppt_value)
+        b = number(excel_value)
+        return 1.0 if a and b is not None and a[0] == b else 0.0
+
+    if field == "height":
+        a = parse_size(ppt_value)
+        b = number(excel_value)
+        return 1.0 if a and b is not None and a[1] == b else 0.0
+
+    if field == "type":
+        return 1.0 if norm_type(ppt_value) == norm_type(excel_value) else 0.0
+
+    if field == "qty":
+        a, b = number(ppt_value), number(excel_value)
+        return 1.0 if a is not None and b is not None and a == b else 0.0
+
+    if field == "name":
+        return similarity(ppt_value, excel_value)
+
+    if field in ("address", "district"):
+        a, b = norm_address(ppt_value), norm_address(excel_value)
+        if not a or not b:
+            return 0.0
+        if a == b:
+            return 1.0
+        return difflib.SequenceMatcher(None, a, b).ratio()
+
+    return 0.0
+
+
+def column_ppt_score(df, col, field, ppt_records):
     """
+    Jointly discover the Excel column by matching its DATA to the actual PPT
+    records. This is much safer than guessing from headings alone.
+    """
+    if not ppt_records:
+        return 0.0
+
+    vals = [v for v in df[col].dropna().tolist() if str(v).strip()]
+    if not vals:
+        return 0.0
+
+    per_record = []
+    for rec in ppt_records:
+        pv = rec.get(field, "")
+        if not pv:
+            continue
+
+        best = max(
+            (ppt_excel_similarity(field, pv, ev) for ev in vals),
+            default=0.0
+        )
+        per_record.append(best)
+
+    return sum(per_record) / len(per_record) if per_record else 0.0
+
+
+def infer_dimension_pair(df, ppt_records, used=None):
+    """
+    Find Width and Height together, not independently.
+    This prevents a numeric column such as "Shop Painting allocation Sqfit"
+    from being mistaken for Height.
+    """
+    used = used or set()
+    sizes = [parse_size(r.get("size", "")) for r in (ppt_records or [])]
+    sizes = [x for x in sizes if x]
+    if not sizes:
+        return None, None, 0.0
+
+    numeric_cols = []
+    for c in df.columns:
+        if c in used:
+            continue
+        vals = [number(v) for v in df[c].dropna().tolist()]
+        if vals and sum(v is not None for v in vals) / len(vals) >= 0.70:
+            numeric_cols.append(c)
+
+    best = (None, None, 0.0)
+    for wc in numeric_cols:
+        for hc in numeric_cols:
+            if wc == hc:
+                continue
+            # For each PPT size, check whether ANY Excel row contains both
+            # dimensions in the same row.
+            hits = 0
+            for pw, ph in sizes:
+                found = False
+                for _, row in df[[wc, hc]].iterrows():
+                    ew, eh = number(row[wc]), number(row[hc])
+                    if ew is not None and eh is not None and ew == pw and eh == ph:
+                        found = True
+                        break
+                if found:
+                    hits += 1
+            score = hits / len(sizes)
+            if score > best[2]:
+                best = (wc, hc, score)
+
+    return best
+
+
+def infer_columns(df, ppt_records=None):
+    """
+    Automatically discover Excel fields.
+
+    Priority:
+      1) Match the actual Excel DATA against actual PPT records.
+      2) Use data-pattern detection as fallback.
+      3) Use the Excel heading only as a small tie-breaker.
+
+    Therefore headings such as "Name of firm", "Dealer", "Party", etc. are
+    NOT required for the tool to know which data column is the firm name.
+    """
+    ppt_records = ppt_records or []
     columns = list(df.columns)
-    result = {f: None for f in ALIASES}
-    used = set()
+    result = {f: None for f in
+              ["name", "address", "contact", "district", "type", "qty",
+               "width", "height", "sap"]}
 
-    # Candidate score matrix.
-    scores = {}
-    for field in ALIASES:
-        scores[field] = {}
-        header_col = find_col_by_header(columns, field)
-        for c in columns:
-            data_score = score_column_by_data(df[c], field)
-            header_bonus = 0.08 if c == header_col else 0.0
-            scores[field][c] = min(1.0, data_score + header_bonus)
+    fields = list(result.keys())
+    scores = {f: {} for f in fields}
 
-    # Assign distinctive fields first.
-    order = ["contact", "qty", "width", "height", "type", "address", "district", "name"]
+    for field in fields:
+        for col in columns:
+            joint = column_ppt_score(df, col, field, ppt_records)
+            profile = score_column_by_data(df[col], field)
+            hcol = find_col_by_header(columns, field)
+            header_bonus = 0.025 if col == hcol else 0.0
+
+            # Actual PPT↔Excel agreement is deliberately dominant.
+            scores[field][col] = min(
+                1.0,
+                0.88 * joint + 0.10 * profile + header_bonus
+            )
+
+    # If the PPT has SAP codes, SAP is an excellent anchor and should be
+    # detected before ordinary text fields.
+    order = ["sap", "contact", "name", "address", "width", "height",
+             "type", "qty", "district"]
+
     minimums = {
-        "contact": 0.55, "width": 0.70, "height": 0.70, "type": 0.45,
-        "qty": 0.70, "address": 0.38, "district": 0.45, "name": 0.55
+        "sap": 0.55,
+        "contact": 0.55,
+        "name": 0.55,
+        "address": 0.50,
+        "width": 0.55,
+        "height": 0.55,
+        "type": 0.50,
+        "qty": 0.50,
+        "district": 0.45,
     }
 
+    used = set()
     for field in order:
         ranked = sorted(
             ((scores[field][c], c) for c in columns if c not in used),
@@ -260,24 +404,46 @@ def infer_columns(df):
         )
         if not ranked:
             continue
-        best_score, best_col = ranked[0]
 
-        # For width/height, avoid choosing serial/SAP/quantity columns where
-        # possible by requiring strong numeric evidence.
+        best_score, best_col = ranked[0]
         if best_score >= minimums[field]:
             result[field] = best_col
             used.add(best_col)
 
-    # Width and height can be confused because both are numeric. If their
-    # header names clearly indicate W/H, honor those as a tie-breaker.
-    for field, token in [("width", "w"), ("height", "h")]:
-        hcol = find_col_by_header(columns, field)
-        if hcol is not None:
-            if result[field] != hcol and hcol not in used:
-                if result[field] in used:
-                    used.remove(result[field])
-                result[field] = hcol
-                used.add(hcol)
+    # Width + Height must be detected as a PAIR from the same Excel rows.
+    # This is stronger than independent numeric-column guessing.
+    if any(r.get("size") for r in ppt_records):
+        wc, hc, pair_score = infer_dimension_pair(df, ppt_records, used)
+        if pair_score >= 0.50:
+            if result["width"] is not None:
+                used.discard(result["width"])
+            if result["height"] is not None:
+                used.discard(result["height"])
+            result["width"], result["height"] = wc, hc
+            used.add(wc)
+            used.add(hc)
+
+    # If a field is absent from the PPT, leave it unassigned instead of
+    # guessing from unrelated data. It is not needed for matching.
+    ppt_field_present = {
+        f: any(bool(r.get(f)) for r in ppt_records)
+        for f in fields
+    }
+
+    # Only use data-pattern fallback for fields that actually exist in PPT.
+    for field in fields:
+        if result[field] is not None or not ppt_field_present.get(field, False):
+            continue
+
+        available = [(score_column_by_data(df[c], field), c)
+                     for c in columns if c not in used]
+        available.sort(reverse=True)
+
+        if available:
+            best_score, best_col = available[0]
+            if best_score >= minimums[field]:
+                result[field] = best_col
+                used.add(best_col)
 
     return result
 
@@ -292,13 +458,14 @@ FIELD_PATTERNS = {
     "size": r"^\s*(size|dimensions?)\s*[:\-]\s*(.*)$",
     "type": r"^\s*(media\s*type|media|type)\s*[:\-]\s*(.*)$",
     "qty": r"^\s*(qty|quantity|qnty)\s*[:\-]\s*(.*)$",
-    "remark": r"^\s*(remarks?|client\s*remarks?|comments?|observation)\s*[:\-]\s*(.*)$",
+    "sap": r"^\s*(sap\s*code|sapcode|customer\s*code)\s*[:\-]\s*(.*)$",
+    "remark": r"^\s*(remarks?|client\s*remarks?|comments?|observation)(?:\s*,?\s*if\s+any)?\s*[:\-]\s*(.*)$",
 }
 
 EXCLUDED_LABELS = {
     "qty", "quantity", "size", "media type", "media", "outlet name", "dealer name",
     "address", "contact", "contact no", "contact number", "mobile", "mobile no",
-    "sapcode", "sap code", "district", "s_no", "s no", "s.no", "sr no", "sr.no"
+    "sapcode", "sap code", "customer code", "dealer code", "party code", "district", "s_no", "s no", "s.no", "sr no", "sr.no"
 }
 
 def slide_texts(slide):
@@ -328,7 +495,7 @@ def slide_texts(slide):
 
 def extract_ppt_record(slide):
     texts = slide_texts(slide)
-    rec = {k: "" for k in ["name","address","contact","district","size","type","qty"]}
+    rec = {k: "" for k in ["name","address","contact","district","size","type","qty","sap"]}
     explicit_remarks = []
     used_lines = set()
 
@@ -358,6 +525,7 @@ def extract_ppt_record(slide):
     # Handle labels/values when PowerPoint splits label and value into separate shapes.
     for i, text in enumerate(texts):
         label = clean_text(text).rstrip(":").strip()
+        label = re.sub(r"\s*,?\s*if\s+any$", "", label).strip()
         if label in {"outlet name","dealer name","customer name","shop name","address",
                      "dealer address","outlet address","contact no","contact","mobile no",
                      "mobile","district","size","dimensions","media type","media","type",
@@ -416,16 +584,25 @@ def contact_score(ppt_contact, excel_contact):
 
 def match_score(rec, row):
     scores, weights = [], []
+
+    # SAP Code is the strongest available identifier when present in both files.
+    if rec.get("sap") and row.get("_sap"):
+        a = re.sub(r"\D", "", str(rec["sap"]))
+        b = re.sub(r"\D", "", str(row["_sap"]))
+        if a and b:
+            scores.append(1.0 if a == b else 0.0)
+            weights.append(25)
+
     ns = similarity(rec["name"], row["_name"])
     if rec["name"] and row["_name"]:
-        scores.append(ns); weights.append(30)
+        scores.append(ns); weights.append(25)
 
     cs = contact_score(rec["contact"], row["_contact"])
     if cs is not None:
         scores.append(cs); weights.append(20)
 
     if rec["address"] and row["_address"]:
-        scores.append(similarity(rec["address"], row["_address"])); weights.append(15)
+        scores.append(similarity(rec["address"], row["_address"])); weights.append(10)
 
     if rec["district"] and row["_district"]:
         scores.append(similarity(rec["district"], row["_district"])); weights.append(10)
@@ -458,6 +635,7 @@ def prepare_rows(df, cols):
             "_height": r.get(cols["height"], "") if cols["height"] else "",
             "_type": r.get(cols["type"], "") if cols["type"] else "",
             "_qty": r.get(cols["qty"], "") if cols["qty"] else "",
+            "_sap": r.get(cols["sap"], "") if cols.get("sap") else "",
         })
     return rows
 
@@ -631,13 +809,23 @@ if excel_file and ppt_file:
         try:
             with st.spinner("Analyzing Excel and PowerPoint..."):
                 df = read_excel(excel_file)
-                cols = infer_columns(df)
-                missing = [k for k in ["name","contact"] if not cols[k]]
-                if missing:
-                    st.error("Could not identify required Excel columns: " + ", ".join(missing))
-                    st.stop()
 
                 prs = Presentation(io.BytesIO(ppt_file.getvalue()))
+                ppt_records = []
+                for _slide_no, _slide in enumerate(prs.slides, start=1):
+                    _rec, _explicit, _texts = extract_ppt_record(_slide)
+                    if _rec["name"] or _rec["contact"] or _rec["size"] or _rec.get("sap"):
+                        ppt_records.append(_rec)
+
+                # Let the actual PPT records teach the Excel column detector.
+                cols = infer_columns(df, ppt_records)
+
+                missing = [k for k in ["name","contact"] if not cols[k]]
+                if missing:
+                    st.error("Could not reliably identify required Excel data columns: " + ", ".join(missing))
+                    st.info("The tool now compares the actual PPT data against every Excel column. Check the Detected Excel field mapping below if the file uses an unusual data layout.")
+                    st.stop()
+
                 rows = prepare_rows(df, cols)
                 used = set()
                 matches = []
@@ -714,7 +902,7 @@ if "result" in st.session_state:
     )
 
     with st.expander("🔎 Detected Excel field mapping"):
-        st.write("Columns are detected primarily from the data pattern; headings are only used as a secondary hint.")
+        st.write("Columns are identified by comparing actual PPT record data with actual Excel column values. Headings are only a small tie-breaker.")
         st.json(cols)
 
     with st.expander("📋 Match report"):
