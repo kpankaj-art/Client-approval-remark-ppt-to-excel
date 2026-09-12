@@ -1,255 +1,734 @@
-
 import streamlit as st
 import pandas as pd
-from openpyxl import load_workbook
 from pptx import Presentation
 from io import BytesIO
 import re
 from difflib import SequenceMatcher
 
-st.set_page_config(page_title="Client Remark Extractor", page_icon="📋", layout="wide")
+st.set_page_config(
+    page_title="Client Remark Extractor",
+    page_icon="📋",
+    layout="wide"
+)
 
-st.title("📋 Client Remark Extractor")
-st.caption("Upload Excel + Client PPT → extract client remarks → add them to a new 'Client Remark' column.")
+st.markdown("""
+<style>
+.main { background-color: #f8fafc; }
+.block-container { max-width: 1200px; padding-top: 35px; }
+.title {
+    text-align: center;
+    font-size: 34px;
+    font-weight: 700;
+    color: #111827;
+    margin-bottom: 5px;
+}
+.subtitle {
+    text-align: center;
+    color: #667085;
+    font-size: 15px;
+    margin-bottom: 30px;
+}
+.upload-card {
+    padding: 22px;
+    border-radius: 16px;
+    min-height: 190px;
+    margin-bottom: 15px;
+}
+.excel-card {
+    background: #ecfdf3;
+    border: 2px solid #22c55e;
+}
+.ppt-card {
+    background: #fff1f2;
+    border: 2px solid #ef4444;
+}
+.upload-title {
+    font-size: 20px;
+    font-weight: 700;
+    margin-bottom: 5px;
+}
+.excel-title { color: #15803d; }
+.ppt-title { color: #dc2626; }
+.upload-description {
+    color: #667085;
+    font-size: 13px;
+    margin-bottom: 15px;
+}
+.stButton > button {
+    width: 100%;
+    height: 48px;
+    border-radius: 10px;
+    font-size: 16px;
+    font-weight: 700;
+}
+</style>
+""", unsafe_allow_html=True)
 
-def norm(s):
-    if s is None:
+st.markdown(
+    '<div class="title">Client Remark Extractor</div>',
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    '<div class="subtitle">'
+    'Extract client remarks from PowerPoint and add them to new Excel columns.'
+    '</div>',
+    unsafe_allow_html=True
+)
+
+EXCLUDED_FIELDS = {
+    "qty", "quantity", "size", "media type", "media",
+    "outlet name", "outlet", "dealer name", "dealer",
+    "address", "contact", "contact no", "contact number",
+    "mobile", "phone", "sapcode", "sap code", "sap-code",
+    "district", "type", "s no", "s.no", "serial no", "serial number"
+}
+
+REMARK_LABELS = {
+    "remark", "remarks", "client remark", "client remarks",
+    "comment", "comments", "client comment", "client comments",
+    "observation", "observations"
+}
+
+def clean_text(text):
+    if text is None:
         return ""
-    s = str(s).strip().lower()
-    s = re.sub(r"\s+", " ", s)
-    return s
+    text = str(text).replace("\xa0", " ")
+    return re.sub(r"\s+", " ", text).strip()
 
-def digits(s):
-    return re.sub(r"\D", "", str(s or ""))
+def normalize(text):
+    text = clean_text(text).lower()
+    text = re.sub(r"[^a-z0-9 ]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
-def extract_ppt_slides(ppt_bytes):
-    prs = Presentation(BytesIO(ppt_bytes))
+def extract_field(lines, possible_labels):
+    possible_labels = {normalize(x) for x in possible_labels}
+
+    for line in lines:
+        line = clean_text(line)
+
+        match = re.match(
+            r"^\s*([^:\-]{2,50})\s*[:\-]\s*(.*?)\s*$",
+            line
+        )
+
+        if not match:
+            continue
+
+        label = normalize(match.group(1))
+        value = clean_text(match.group(2))
+
+        if label in possible_labels:
+            return value
+
+    return ""
+
+def extract_client_remarks(text):
+    lines = [
+        clean_text(x)
+        for x in text.splitlines()
+        if clean_text(x)
+    ]
+
+    remarks = []
+
+    # Explicit labels such as:
+    # Remarks: OK
+    # Client Comment: Please change the board
+    for line in lines:
+        match = re.match(
+            r"^\s*([^:\-]{2,50})\s*[:\-]\s*(.*?)\s*$",
+            line
+        )
+
+        if not match:
+            continue
+
+        label = normalize(match.group(1))
+        value = clean_text(match.group(2))
+
+        if label in REMARK_LABELS and value:
+            remarks.append(value)
+
+    # Label on one line, remark on following lines
+    for i, line in enumerate(lines):
+        if normalize(line) in REMARK_LABELS:
+            collected = []
+
+            for next_line in lines[i + 1:]:
+                match = re.match(
+                    r"^\s*([^:\-]{2,50})\s*[:\-]\s*(.*?)\s*$",
+                    next_line
+                )
+
+                if match:
+                    next_label = normalize(match.group(1))
+
+                    if next_label in EXCLUDED_FIELDS:
+                        break
+
+                    if next_label in REMARK_LABELS:
+                        break
+
+                collected.append(next_line)
+
+            if collected:
+                remarks.append(" ".join(collected))
+
+    # Remove duplicates
+    final_remarks = []
+    seen = set()
+
+    for remark in remarks:
+        remark = clean_text(remark)
+
+        if not remark:
+            continue
+
+        key = remark.lower()
+
+        if key not in seen:
+            seen.add(key)
+            final_remarks.append(remark)
+
+    return final_remarks
+
+def extract_ppt_data(ppt_bytes):
+    presentation = Presentation(BytesIO(ppt_bytes))
     records = []
 
-    for slide_no, slide in enumerate(prs.slides, start=1):
-        texts = []
-        for shape in slide.shapes:
-            if hasattr(shape, "text") and shape.text:
-                t = shape.text.strip()
-                if t:
-                    texts.append(t)
+    for slide_number, slide in enumerate(
+        presentation.slides,
+        start=1
+    ):
+        slide_texts = []
 
-        full = "\n".join(texts)
+        for shape in slide.shapes:
+
+            # Read table cells
+            if getattr(shape, "has_table", False):
+                for row in shape.table.rows:
+                    for cell in row.cells:
+                        text = clean_text(cell.text)
+                        if text:
+                            slide_texts.append(text)
+
+            # Read normal text boxes
+            elif hasattr(shape, "text"):
+                text = clean_text(shape.text)
+
+                if text:
+                    slide_texts.append(text)
+
+        full_text = "\n".join(slide_texts)
+
+        lines = [
+            clean_text(x)
+            for x in full_text.splitlines()
+            if clean_text(x)
+        ]
+
+        outlet = extract_field(
+            lines,
+            ["Outlet Name", "Outlet", "Dealer Name", "Dealer"]
+        )
+
+        contact = extract_field(
+            lines,
+            ["Contact", "Contact No", "Contact Number",
+             "Mobile", "Phone"]
+        )
+
+        media = extract_field(
+            lines,
+            ["Media Type", "Media", "Type"]
+        )
+
+        size = extract_field(
+            lines,
+            ["Size"]
+        )
+
+        qty = extract_field(
+            lines,
+            ["Qty", "Quantity"]
+        )
+
+        remarks = extract_client_remarks(full_text)
+
         records.append({
-            "slide": slide_no,
-            "texts": texts,
-            "full_text": full
+            "slide": slide_number,
+            "outlet": outlet,
+            "contact": contact,
+            "media": media,
+            "size": size,
+            "qty": qty,
+            "remarks": remarks,
+            "raw_text": full_text
         })
 
     return records
 
-def extract_label_value(text, labels):
-    for label in labels:
-        pattern = rf"(?im)^\s*{re.escape(label)}\s*[:\-]\s*(.+?)\s*$"
-        m = re.search(pattern, text)
-        if m:
-            return m.group(1).strip()
-    return ""
-
-def extract_ppt_record(rec):
-    text = rec["full_text"]
-
-    outlet = extract_label_value(text, ["Outlet Name", "Outlet", "Dealer Name", "Dealer"])
-    contact = extract_label_value(text, ["Contact No", "Contact", "Mobile", "Mob", "Phone"])
-    media = extract_label_value(text, ["Media Type", "Media", "Type"])
-    size = extract_label_value(text, ["Size", "Size (Inches)", "Type And Size"])
-
-    # Common remark labels. The detector deliberately keeps the complete value.
-    remark = extract_label_value(
-        text,
-        ["Remarks", "Remark", "Client Remark", "Client Remarks",
-         "Client Comment", "Comment", "Comments", "Observation", "Observations"]
+def parse_size(value):
+    numbers = re.findall(
+        r"\d+(?:\.\d+)?",
+        str(value or "")
     )
 
-    qty = extract_label_value(text, ["Qty", "Quantity"])
+    if len(numbers) >= 2:
+        return numbers[0], numbers[1]
 
-    return {
-        "slide": rec["slide"],
-        "outlet": outlet,
-        "contact": contact,
-        "media": media,
-        "size": size,
-        "qty": qty,
-        "remark": remark,
-        "raw_text": text
-    }
-
-def parse_size(value):
-    nums = re.findall(r"\d+(?:\.\d+)?", str(value or ""))
-    if len(nums) >= 2:
-        return nums[0], nums[1]
     return "", ""
 
-def find_col(columns, candidates):
-    normalized = {norm(c): c for c in columns}
-    for c in candidates:
-        if norm(c) in normalized:
-            return normalized[norm(c)]
-    for col in columns:
-        n = norm(col)
-        for c in candidates:
-            if norm(c) in n or n in norm(c):
-                return col
+def find_column(columns, names):
+    normalized_columns = {
+        normalize(c): c for c in columns
+    }
+
+    for name in names:
+        key = normalize(name)
+
+        if key in normalized_columns:
+            return normalized_columns[key]
+
     return None
 
-def score_match(ppt, row):
+def similarity(a, b):
+    a = clean_text(a).lower()
+    b = clean_text(b).lower()
+
+    if not a or not b:
+        return 0
+
+    return SequenceMatcher(
+        None,
+        a,
+        b
+    ).ratio()
+
+def calculate_row_score(ppt_record, row):
     score = 0
-    reasons = []
 
-    outlet_col = find_col(row.index, ["Outlet Name", "Dealer Name", "Dealer", "Name"])
-    contact_col = find_col(row.index, ["Contact No", "Contact", "Mobile", "Phone"])
-    media_col = find_col(row.index, ["Media Type", "Media", "Type"])
-    size_col = find_col(row.index, ["Size", "Size (Inches)"])
-    w_col = find_col(row.index, ["W", "Width"])
-    h_col = find_col(row.index, ["H", "Height"])
-    qty_col = find_col(row.index, ["Qty", "Quantity"])
+    outlet_column = find_column(
+        row.index,
+        ["Outlet Name", "Dealer Name", "Dealer", "Name"]
+    )
 
-    if outlet_col and ppt["outlet"]:
-        a, b = norm(ppt["outlet"]), norm(row[outlet_col])
-        if a and b:
-            ratio = SequenceMatcher(None, a, b).ratio()
-            if ratio >= .95:
-                score += 45; reasons.append("outlet exact")
-            elif ratio >= .75:
-                score += 30; reasons.append("outlet similar")
+    contact_column = find_column(
+        row.index,
+        ["Contact", "Contact No", "Mobile", "Phone"]
+    )
 
-    if contact_col and ppt["contact"]:
-        if digits(ppt["contact"]) and digits(ppt["contact"]) == digits(row[contact_col]):
-            score += 30; reasons.append("contact")
+    media_column = find_column(
+        row.index,
+        ["Media Type", "Media", "Type"]
+    )
 
-    if media_col and ppt["media"]:
-        if norm(ppt["media"]) == norm(row[media_col]):
-            score += 10; reasons.append("media")
+    size_column = find_column(
+        row.index,
+        ["Size"]
+    )
 
-    pw, ph = parse_size(ppt["size"])
-    if pw and ph:
-        if w_col and h_col:
-            if norm(pw) == norm(row[w_col]) and norm(ph) == norm(row[h_col]):
-                score += 15; reasons.append("size")
-        elif size_col:
-            rw, rh = parse_size(row[size_col])
-            if pw == rw and ph == rh:
-                score += 15; reasons.append("size")
+    width_column = find_column(
+        row.index,
+        ["W", "Width"]
+    )
 
-    if qty_col and ppt["qty"]:
-        if norm(ppt["qty"]) == norm(row[qty_col]):
-            score += 5; reasons.append("qty")
+    height_column = find_column(
+        row.index,
+        ["H", "Height"]
+    )
 
-    return score, reasons
+    # Outlet matching
+    if outlet_column and ppt_record["outlet"]:
+        ratio = similarity(
+            ppt_record["outlet"],
+            row[outlet_column]
+        )
+
+        if ratio >= 0.92:
+            score += 55
+        elif ratio >= 0.75:
+            score += 35
+
+    # Contact matching
+    if contact_column and ppt_record["contact"]:
+        ppt_contact = re.sub(
+            r"\D",
+            "",
+            ppt_record["contact"]
+        )
+
+        excel_contact = re.sub(
+            r"\D",
+            "",
+            str(row[contact_column])
+        )
+
+        if (
+            ppt_contact
+            and excel_contact
+            and ppt_contact == excel_contact
+        ):
+            score += 35
+
+    # Media matching
+    if media_column and ppt_record["media"]:
+        if normalize(
+            ppt_record["media"]
+        ) == normalize(
+            row[media_column]
+        ):
+            score += 10
+
+    # Size matching
+    ppt_width, ppt_height = parse_size(
+        ppt_record["size"]
+    )
+
+    if ppt_width and ppt_height:
+
+        if width_column and height_column:
+
+            excel_width = clean_text(
+                row[width_column]
+            )
+
+            excel_height = clean_text(
+                row[height_column]
+            )
+
+            if (
+                ppt_width == excel_width
+                and
+                ppt_height == excel_height
+            ):
+                score += 15
+
+        elif size_column:
+
+            excel_width, excel_height = parse_size(
+                row[size_column]
+            )
+
+            if (
+                ppt_width == excel_width
+                and
+                ppt_height == excel_height
+            ):
+                score += 15
+
+    return score
 
 def process_excel(excel_bytes, ppt_records):
-    xls = pd.ExcelFile(BytesIO(excel_bytes))
+    excel = pd.ExcelFile(
+        BytesIO(excel_bytes)
+    )
+
     results = []
 
-    for sheet in xls.sheet_names:
-        df = pd.read_excel(BytesIO(excel_bytes), sheet_name=sheet)
+    for sheet_name in excel.sheet_names:
+
+        df = pd.read_excel(
+            BytesIO(excel_bytes),
+            sheet_name=sheet_name
+        )
+
         if df.empty:
-            results.append((sheet, df, []))
+            results.append(
+                (sheet_name, df, [])
+            )
             continue
 
-        # Always create a new column; do not overwrite existing REMARK.
-        if "Client Remark" not in df.columns:
-            df["Client Remark"] = ""
-        else:
-            df["Client Remark"] = df["Client Remark"].fillna("")
+        # Find maximum number of remarks in any slide
+        max_remarks = max(
+            [
+                len(record["remarks"])
+                for record in ppt_records
+            ],
+            default=1
+        )
 
-        matches = []
+        # Always create new columns
+        for number in range(
+            1,
+            max_remarks + 1
+        ):
 
-        for ppt in ppt_records:
-            best_idx = None
-            best_score = -1
-            best_reasons = []
-
-            for idx, row in df.iterrows():
-                score, reasons = score_match(ppt, row)
-                if score > best_score:
-                    best_score, best_idx, best_reasons = score, idx, reasons
-
-            if best_idx is not None and best_score >= 45:
-                # Remark itself is NOT matched. Only the PPT record is matched to a row.
-                df.at[best_idx, "Client Remark"] = ppt["remark"]
-                matches.append({
-                    "slide": ppt["slide"],
-                    "row": int(best_idx) + 2,
-                    "score": best_score,
-                    "remark": ppt["remark"],
-                    "status": "Matched"
-                })
+            if number == 1:
+                column_name = "Client Remark"
             else:
-                matches.append({
-                    "slide": ppt["slide"],
-                    "row": None,
-                    "score": best_score,
-                    "remark": ppt["remark"],
-                    "status": "Review"
-                })
+                column_name = f"Client Remark {number}"
 
-        results.append((sheet, df, matches))
+            if column_name not in df.columns:
+                df[column_name] = ""
+
+        reports = []
+
+        for record in ppt_records:
+
+            best_row = None
+            best_score = -1
+
+            # IMPORTANT:
+            # Only PPT RECORD is matched to Excel.
+            # The remark itself is NEVER used for matching.
+            for index, row in df.iterrows():
+
+                current_score = calculate_row_score(
+                    record,
+                    row
+                )
+
+                if current_score > best_score:
+                    best_score = current_score
+                    best_row = index
+
+            if (
+                best_row is not None
+                and
+                best_score >= 55
+            ):
+
+                for number, remark in enumerate(
+                    record["remarks"],
+                    start=1
+                ):
+
+                    if number == 1:
+                        column_name = "Client Remark"
+                    else:
+                        column_name = f"Client Remark {number}"
+
+                    df.at[
+                        best_row,
+                        column_name
+                    ] = remark
+
+                status = "Matched"
+                excel_row = int(best_row) + 2
+
+            else:
+                status = "Review"
+                excel_row = ""
+
+            reports.append({
+                "Slide": record["slide"],
+                "Excel Row": excel_row,
+                "Match Score": best_score,
+                "Status": status,
+                "Client Remark": (
+                    " | ".join(record["remarks"])
+                    if record["remarks"]
+                    else ""
+                )
+            })
+
+        results.append(
+            (sheet_name, df, reports)
+        )
 
     return results
 
-def make_xlsx(results):
+def create_output_excel(results):
     output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        for sheet, df, _ in results:
-            df.to_excel(writer, sheet_name=str(sheet)[:31], index=False)
+
+    with pd.ExcelWriter(
+        output,
+        engine="openpyxl"
+    ) as writer:
+
+        for (
+            sheet_name,
+            dataframe,
+            reports
+        ) in results:
+
+            dataframe.to_excel(
+                writer,
+                sheet_name=str(sheet_name)[:31],
+                index=False
+            )
+
     output.seek(0)
+
     return output.getvalue()
 
-excel_file = st.file_uploader("📊 Upload Excel file", type=["xlsx", "xls"])
-ppt_file = st.file_uploader("📑 Upload Client PPT", type=["pptx"])
+# =========================================================
+# UPLOAD UI
+# =========================================================
+
+left, right = st.columns(2)
+
+with left:
+
+    st.markdown(
+        """
+        <div class="upload-card excel-card">
+            <div class="upload-title excel-title">
+                🟩 Excel File
+            </div>
+            <div class="upload-description">
+                Upload the source Excel workbook.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    excel_file = st.file_uploader(
+        "Choose Excel File",
+        type=["xlsx", "xls"],
+        key="excel_upload"
+    )
+
+with right:
+
+    st.markdown(
+        """
+        <div class="upload-card ppt-card">
+            <div class="upload-title ppt-title">
+                🟥 PowerPoint File
+            </div>
+            <div class="upload-description">
+                Upload the client PowerPoint presentation.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    ppt_file = st.file_uploader(
+        "Choose PowerPoint File",
+        type=["pptx"],
+        key="ppt_upload"
+    )
+
+st.write("")
 
 if excel_file and ppt_file:
-    if st.button("🚀 Process Remarks", type="primary", use_container_width=True):
+
+    if st.button(
+        "PROCESS FILES",
+        type="primary",
+        use_container_width=True
+    ):
+
         try:
-            with st.spinner("Reading PPT and extracting client remarks..."):
-                ppt_records_raw = extract_ppt_slides(ppt_file.getvalue())
-                ppt_records = [extract_ppt_record(r) for r in ppt_records_raw]
 
-            with st.spinner("Matching PPT records to Excel rows..."):
-                results = process_excel(excel_file.getvalue(), ppt_records)
+            with st.spinner(
+                "Reading PowerPoint and extracting client remarks..."
+            ):
+                ppt_records = extract_ppt_data(
+                    ppt_file.getvalue()
+                )
 
-            total = sum(len(x[2]) for x in results)
-            matched = sum(1 for x in results for m in x[2] if m["status"] == "Matched")
-            review = total - matched
+            with st.spinner(
+                "Adding client remarks to Excel..."
+            ):
+                results = process_excel(
+                    excel_file.getvalue(),
+                    ppt_records
+                )
 
-            st.success(f"Done — {total} PPT records processed, {matched} matched, {review} need review.")
+            all_reports = []
 
-            st.subheader("Extracted client remarks")
-            preview = pd.DataFrame([
-                {
-                    "Slide": r["slide"],
-                    "Outlet": r["outlet"],
-                    "Media": r["media"],
-                    "Size": r["size"],
-                    "Client Remark": r["remark"]
-                } for r in ppt_records
-            ])
-            st.dataframe(preview, use_container_width=True)
+            for (
+                sheet,
+                dataframe,
+                reports
+            ) in results:
 
-            if review:
-                st.warning("Some slides could not be confidently linked to an Excel row. V1 leaves them untouched instead of putting a remark into a potentially wrong row.")
-                review_df = pd.DataFrame([
-                    m for _, _, ms in results for m in ms if m["status"] == "Review"
-                ])
-                st.dataframe(review_df, use_container_width=True)
+                all_reports.extend(reports)
 
-            output_bytes = make_xlsx(results)
+            total_slides = len(all_reports)
+
+            remarks_found = sum(
+                1
+                for report in all_reports
+                if report["Client Remark"]
+            )
+
+            matched = sum(
+                1
+                for report in all_reports
+                if report["Status"] == "Matched"
+            )
+
+            col1, col2, col3 = st.columns(3)
+
+            col1.metric(
+                "Slides Processed",
+                total_slides
+            )
+
+            col2.metric(
+                "Remarks Found",
+                remarks_found
+            )
+
+            col3.metric(
+                "Rows Matched",
+                matched
+            )
+
+            st.success(
+                "Processing completed successfully."
+            )
+
+            st.subheader(
+                "Client Remark Preview"
+            )
+
+            preview = pd.DataFrame(
+                all_reports
+            )
+
+            st.dataframe(
+                preview,
+                use_container_width=True,
+                hide_index=True
+            )
+
+            review_items = [
+                x
+                for x in all_reports
+                if x["Status"] == "Review"
+            ]
+
+            if review_items:
+
+                st.warning(
+                    f"{len(review_items)} slide(s) could not be confidently "
+                    "linked to an Excel row. They were not written to avoid "
+                    "incorrect data."
+                )
+
+            output_excel = create_output_excel(
+                results
+            )
+
             st.download_button(
-                "⬇️ Download Updated Excel",
-                data=output_bytes,
+                label="DOWNLOAD UPDATED EXCEL",
+                data=output_excel,
                 file_name="Updated_Client_Remarks.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                mime=(
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
                 use_container_width=True
             )
 
-        except Exception as e:
-            st.error(f"Error: {e}")
-            st.exception(e)
+        except Exception as error:
+
+            st.error(
+                "An error occurred while processing the files."
+            )
+
+            st.exception(error)
+
 else:
-    st.info("Upload both files to start.")
+
+    st.info(
+        "Upload both an Excel file and a PowerPoint file to start."
+    )
