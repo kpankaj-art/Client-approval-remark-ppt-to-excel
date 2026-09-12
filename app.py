@@ -7,6 +7,7 @@ from pptx import Presentation
 from openpyxl import load_workbook
 
 st.set_page_config(page_title="PPT → Excel Client Remark Extractor", page_icon="📊", layout="wide")
+st.session_state.setdefault("_upload_version", 0)
 
 # -----------------------------
 # Normalization / matching
@@ -82,17 +83,27 @@ def similarity(a, b):
     return difflib.SequenceMatcher(None, a, b).ratio()
 
 # -----------------------------
-# Semantic Excel header finder
+# Automatic Excel column detection
 # -----------------------------
+# Headings are only a hint. The real detection is based on the values in each
+# column, so Excel can use "Name of firm", "Dealer", "Party", "XYZ", etc.
 ALIASES = {
-    "name": ["dealer/name", "dealer name", "outlet name", "outlet", "dealer", "customer name", "shop name", "party name", "name"],
-    "address": ["dealer/address", "dealer address", "dealer adderess", "dealer/adderess", "address", "outlet address", "location"],
-    "contact": ["mobile no.", "mobile no", "mobile", "contact no", "contact", "dealer/contact", "dealer contact", "dealer/contact no", "phone no", "phone", "mobile number", "contact number"],
+    "name": ["dealer/name", "dealer name", "dealer", "outlet name", "outlet",
+             "customer name", "customer", "shop name", "shop", "party name",
+             "party", "client name", "client", "firm name", "firm",
+             "business name", "business", "retailer name", "retailer", "name"],
+    "address": ["dealer/address", "dealer address", "dealer adderess",
+                "dealer/adderess", "address", "outlet address", "shop address",
+                "shop location", "location", "full address", "customer address"],
+    "contact": ["mobile no.", "mobile no", "mobile", "contact no", "contact",
+                "dealer/contact", "dealer contact", "dealer/contact no",
+                "dealer mobile", "phone no", "phone", "mobile number",
+                "contact number", "phone number", "telephone"],
     "district": ["district name", "district"],
     "type": ["media type", "media", "type", "media_type"],
     "qty": ["qty", "quantity", "qnty"],
-    "width": ["w", "width", "w width", "width (0)"],
-    "height": ["h", "height", "h height", "height (0)"],
+    "width": ["w", "width", "w width", "width (0)", "widht"],
+    "height": ["h", "height", "h height", "height (0)", "hight"],
 }
 
 def header_key(h):
@@ -100,34 +111,183 @@ def header_key(h):
     s = re.sub(r"[^a-z0-9]+", " ", s)
     return re.sub(r"\s+", " ", s).strip()
 
-def find_col(columns, field):
-    cols = list(columns)
-    keys = {c: header_key(c) for c in cols}
+def find_col_by_header(columns, field):
+    """Use header only as a secondary tie-breaker."""
+    best, score = None, 0.0
     aliases = [header_key(x) for x in ALIASES[field]]
-    for a in aliases:
-        for c, k in keys.items():
-            if k == a:
-                return c
-    # fuzzy fallback
-    best, score = None, 0
-    for c, k in keys.items():
+    for c in columns:
+        k = header_key(c)
         if not k:
             continue
-        r = difflib.SequenceMatcher(None, k, aliases[0]).ratio()
-        if r > score:
-            best, score = c, r
+        for a in aliases:
+            r = difflib.SequenceMatcher(None, k, a).ratio()
+            if r > score:
+                best, score = c, r
     return best if score >= 0.72 else None
 
+def value_samples(series, limit=120):
+    vals = []
+    for v in series.dropna().head(limit):
+        s = str(v).strip()
+        if s:
+            vals.append(s)
+    return vals
+
+def score_column_by_data(series, field):
+    """
+    Return a 0..1 score based on the actual values in a column.
+    This deliberately does not require a particular header.
+    """
+    vals = value_samples(series)
+    if not vals:
+        return 0.0
+
+    scores = []
+
+    if field == "contact":
+        for v in vals:
+            nums = phone_numbers(v)
+            scores.append(1.0 if nums else 0.0)
+        return sum(scores) / len(scores)
+
+    if field in ("width", "height"):
+        nums = [number(v) for v in vals]
+        valid = [n for n in nums if n is not None]
+        if not valid:
+            return 0.0
+
+        # W/H columns are numeric, but so are SR NO, SAP Code and QTY.
+        # Distinguish them by realistic dimension ranges and by avoiding
+        # columns dominated by 0/1 or very large code numbers.
+        numeric_ratio = len(valid) / len(vals)
+        medium = sum(1 for n in valid if 2 <= n <= 3000) / len(valid)
+        not_code = sum(1 for n in valid if n < 10000) / len(valid)
+        varied = 1.0 if len(set(valid)) > 1 else 0.5
+        return min(1.0, 0.45 * numeric_ratio + 0.35 * medium + 0.15 * not_code + 0.05 * varied)
+
+    if field == "qty":
+        good = 0
+        for v in vals:
+            n = number(v)
+            if n is not None and 0 <= n <= 100 and float(n).is_integer():
+                good += 1
+        return good / len(vals)
+
+    if field == "type":
+        known = {"nl", "nlb", "vsb", "gsb", "sb", "fl", "nonlit",
+                 "nonlitboard", "nonlit board", "lit", "glow sign board"}
+        for v in vals:
+            n = norm_type(v)
+            if n in {re.sub(r"[^a-z0-9]", "", x) for x in known}:
+                scores.append(1.0)
+            elif len(n) <= 12 and any(x in n for x in ("nl", "gsb", "vsb", "sb")):
+                scores.append(0.65)
+            else:
+                scores.append(0.0)
+        return sum(scores) / len(scores)
+
+    if field == "district":
+        # District values are usually short alphabetic location names.
+        for v in vals:
+            s = norm_name(v)
+            scores.append(1.0 if 2 <= len(s.split()) <= 4 and not any(ch.isdigit() for ch in s) else 0.2)
+        return sum(scores) / len(scores)
+
+    if field == "address":
+        address_words = {
+            "road", "rd", "road.", "near", "village", "vill", "gram", "post",
+            "po", "nagar", "market", "main", "mohalla", "street", "st",
+            "kanpur", "mau", "lucknow", "district", "dist", "chowk", "modle"
+        }
+        for v in vals:
+            s = norm_address(v)
+            tokens = set(s.split())
+            hits = len(tokens & address_words)
+            # Long text with address-like words is strong evidence.
+            scores.append(min(1.0, 0.45 + 0.12 * hits) if (len(tokens) >= 3 and hits >= 1) else 0.0)
+        return sum(scores) / len(scores)
+
+    if field == "name":
+        for v in vals:
+            s = norm_name(v)
+            tokens = s.split()
+            if not s:
+                scores.append(0.0)
+                continue
+            # Firm/shop names: mostly alphabetic, generally 1-8 words, not long.
+            raw = str(v)
+            alpha_ratio = sum(ch.isalpha() for ch in raw) / max(1, sum(not ch.isspace() for ch in raw))
+            digit_ratio = sum(ch.isdigit() for ch in raw) / max(1, sum(not ch.isspace() for ch in raw))
+            bad = len(s) > 90 or len(tokens) > 12 or digit_ratio > 0.35
+            scores.append(1.0 if alpha_ratio >= 0.65 and not bad else 0.08)
+        return sum(scores) / len(scores)
+
+    return 0.0
+
 def infer_columns(df):
-    return {f: find_col(df.columns, f) for f in ALIASES}
+    """
+    Detect columns from their DATA first, not their headings.
+
+    We solve one-to-one assignment greedily with small header tie-breakers.
+    Width/height are expected to be numeric columns, contact is phone-like,
+    type is a short media-code column, etc.
+    """
+    columns = list(df.columns)
+    result = {f: None for f in ALIASES}
+    used = set()
+
+    # Candidate score matrix.
+    scores = {}
+    for field in ALIASES:
+        scores[field] = {}
+        header_col = find_col_by_header(columns, field)
+        for c in columns:
+            data_score = score_column_by_data(df[c], field)
+            header_bonus = 0.08 if c == header_col else 0.0
+            scores[field][c] = min(1.0, data_score + header_bonus)
+
+    # Assign distinctive fields first.
+    order = ["contact", "qty", "width", "height", "type", "address", "district", "name"]
+    minimums = {
+        "contact": 0.55, "width": 0.70, "height": 0.70, "type": 0.45,
+        "qty": 0.70, "address": 0.38, "district": 0.45, "name": 0.55
+    }
+
+    for field in order:
+        ranked = sorted(
+            ((scores[field][c], c) for c in columns if c not in used),
+            reverse=True
+        )
+        if not ranked:
+            continue
+        best_score, best_col = ranked[0]
+
+        # For width/height, avoid choosing serial/SAP/quantity columns where
+        # possible by requiring strong numeric evidence.
+        if best_score >= minimums[field]:
+            result[field] = best_col
+            used.add(best_col)
+
+    # Width and height can be confused because both are numeric. If their
+    # header names clearly indicate W/H, honor those as a tie-breaker.
+    for field, token in [("width", "w"), ("height", "h")]:
+        hcol = find_col_by_header(columns, field)
+        if hcol is not None:
+            if result[field] != hcol and hcol not in used:
+                if result[field] in used:
+                    used.remove(result[field])
+                result[field] = hcol
+                used.add(hcol)
+
+    return result
 
 # -----------------------------
 # PPT extraction
 # -----------------------------
 FIELD_PATTERNS = {
-    "name": r"^\s*(outlet\s*name|dealer\s*name|customer\s*name|shop\s*name)\s*[:\-]\s*(.*)$",
-    "address": r"^\s*(address|dealer\s*address|outlet\s*address)\s*[:\-]\s*(.*)$",
-    "contact": r"^\s*(contact(?:\s*no|\s*number)?|mobile(?:\s*no|\s*number)?)\s*[:\-]\s*(.*)$",
+    "name": r"^\s*(outlet\s*name|dealer\s*name|dealer|customer\s*name|customer|shop\s*name|shop|party\s*name|client\s*name|firm\s*name|business\s*name)\s*[:\-]\s*(.*)$",
+    "address": r"^\s*(address|dealer\s*address|outlet\s*address|shop\s*address|location|full\s*address)\s*[:\-]\s*(.*)$",
+    "contact": r"^\s*(contact(?:\s*no|\s*number)?|mobile(?:\s*no|\s*number)?|phone(?:\s*no|\s*number)?)\s*[:\-]\s*(.*)$",
     "district": r"^\s*(district)\s*[:\-]\s*(.*)$",
     "size": r"^\s*(size|dimensions?)\s*[:\-]\s*(.*)$",
     "type": r"^\s*(media\s*type|media|type)\s*[:\-]\s*(.*)$",
@@ -427,9 +587,9 @@ st.markdown("""
 <style>
 .main-title {font-size:32px;font-weight:700;margin-bottom:4px}
 .subtitle {color:#667085;margin-bottom:22px}
-.upload-card {padding:18px;border-radius:14px;border:1px solid #ddd;margin-bottom:12px}
-.excel-card {background:#eefbf1;border:2px solid #49a85a}
-.ppt-card {background:#fff0f0;border:2px solid #d94b4b}
+.upload-card {padding:18px;border-radius:14px;border:1px solid #ddd;margin-bottom:12px;color:var(--text-color);}
+.excel-card {background:#eefbf1;border:2px solid #49a85a;color:var(--text-color)}
+.ppt-card {background:#fff0f0;border:2px solid #d94b4b;color:var(--text-color)}
 .small {font-size:13px;color:#667085}
 </style>
 """, unsafe_allow_html=True)
@@ -441,13 +601,32 @@ c1, c2 = st.columns(2)
 
 with c1:
     st.markdown('<div class="upload-card excel-card"><b>🟢 Excel Master File</b><br><span class="small">Supports .xlsx and .xls</span></div>', unsafe_allow_html=True)
-    excel_file = st.file_uploader("Upload Excel", type=["xlsx","xls"], key="excel")
+    excel_file = st.file_uploader("Upload Excel", type=["xlsx","xls"], key=f"excel_{st.session_state["_upload_version"]}")
 
 with c2:
     st.markdown('<div class="upload-card ppt-card"><b>🔴 PowerPoint File</b><br><span class="small">Supports .pptx</span></div>', unsafe_allow_html=True)
-    ppt_file = st.file_uploader("Upload PowerPoint", type=["pptx"], key="ppt")
+    ppt_file = st.file_uploader("Upload PowerPoint", type=["pptx"], key=f"ppt_{st.session_state["_upload_version"]}")
 
 if excel_file and ppt_file:
+    import hashlib
+
+    current_upload_signature = (
+        hashlib.md5(excel_file.getvalue()).hexdigest(),
+        hashlib.md5(ppt_file.getvalue()).hexdigest(),
+    )
+
+    if st.session_state.get("_upload_signature") != current_upload_signature:
+        st.session_state["_upload_signature"] = current_upload_signature
+        for _key in ["result", "matches", "unmatched", "cols"]:
+            st.session_state.pop(_key, None)
+
+    if st.button("🔄 Replace Files / Start New Analysis", use_container_width=True):
+        st.session_state.pop("_upload_signature", None)
+        for _key in ["result", "matches", "unmatched", "cols"]:
+            st.session_state.pop(_key, None)
+        st.session_state["_upload_version"] += 1
+        st.rerun()
+
     if st.button("🚀 Analyze & Match", type="primary", use_container_width=True):
         try:
             with st.spinner("Analyzing Excel and PowerPoint..."):
@@ -535,6 +714,7 @@ if "result" in st.session_state:
     )
 
     with st.expander("🔎 Detected Excel field mapping"):
+        st.write("Columns are detected primarily from the data pattern; headings are only used as a secondary hint.")
         st.json(cols)
 
     with st.expander("📋 Match report"):
